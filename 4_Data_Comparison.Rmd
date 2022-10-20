@@ -1,0 +1,1011 @@
+---
+title: "SSRP: Data Comparison"
+author: "Fidan Sadig"
+output:
+  html_document:
+    keep_md: yes
+    highlight: haddock #tango, pygments, kate, monochrome, espresso, zenburn, haddock, textmate
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    theme: sandstone  #cosmo, paper, lumen, sandstone, simplex, yeti, cerulean, journal, flatly, darkly, readable, spacelab, united
+editor_options: 
+  chunk_output_type: console
+---  
+
+
+***  
+
+### **Script #3 Extras** 
+
+***  
+
+### **0.0 Introduction**  
+
+Here, we're going to compare your processed data with the Smith et al., 2020 data, for which you processed it by our method in script 3.  
+
+**Make your own theme and apply to all plots**  
+
+
+***  
+
+### **1.0 Loading Packages** 
+
+```{r loading packages, message=FALSE, error=FALSE, warning=FALSE}
+
+# rmarkdown packages
+library(knitr) 
+library(rmarkdown)
+library(devtools)
+
+# data wrangling packages
+library(tidyverse)
+library(reshape2)
+library(magrittr)
+library(stringr)
+
+# data loading packages
+library(readxl) 
+library(openxlsx)
+#library(here)
+
+# plotting/table packages 
+library(arsenal)
+library(janitor)
+library(kableExtra) 
+library(egg)
+library(RColorBrewer)
+library(ggpubr)
+
+# advanced genomic packages
+# remotes::install_github("wvictor14/plomics")
+library(plomics)
+# install.packages("BiocManager")
+library(BiocManager)
+# BiocManager::install("edgeR")
+library(edgeR)
+library(pheatmap)
+
+# BiocManager::install(c("limma", "edgeR", "DESeq2", "biomaRt", "miRBaseConverter", "multiMiR", "preprocessCore"))
+
+
+```  
+
+```{r}
+
+library(sysfonts)
+library(showtext)
+library(extrafont)
+
+
+my_theme <- theme_minimal() +
+  theme(plot.title = element_text(family = "mono", size = 22),
+        plot.subtitle = element_text(family = "mono", size = 12),
+        legend.text = element_text(family = "mono", size = 10),
+        axis.title = element_text(family = "mono", size = 14))
+
+
+colpal <- list(Trimester = c(`1` = "#cc3399", `2` = "#99FF00", `3` = "#FF3300"),
+               Sex = c(`MALE` = "#003366", `FEMALE` = "#FF0066"),
+               flowCell = c(`C5JC1ACXX` = "#58508d", `C5JC4ACXX` = "#954693", `C6RGTANXX` = "#cf2d7b"))
+
+
+```
+***
+
+
+### **2.0 Data**  
+
+Load in your `eDat`, `eNorm_log2`, `pDat`, `mDat`, `smith_eNorm_log2`, `smith_mDat` RDS objects, and your excel sheets containing your DEmiRNAs for each trimester. I added an excel sheet to the data folder called `common_DEmiRNAs.xlsx` which contains the 17 DEmiRNAs that were common between t2_t1, t3_t1, t3_t2  
+
+Also make the `eNorm_plot` object as from before:  
+
+
+```{r}
+
+
+eDat <- readRDS(here::here("data", "eDat.RDS"))
+pDat <- readRDS(here::here("data", "pDat.RDS"))
+mDat <- readRDS(here::here("data", "mDat.RDS"))
+smith_eNorm <-readRDS (here:: here ("data", "smith_eNorm.RDS" ))
+smith_mDat <- readRDS(here::here("data", "smith_mDat.RDS"))
+eNorm_log2 <-readRDS(here::here("data", "eNorm_log2.RDS"))
+  
+common_DEmiRNAs <- read_excel(here::here("data", "common_DEmiRNAs.xlsx"))
+
+
+eNorm_plot <- eNorm_log2 %>% 
+  rownames_to_column("mirs") %>% 
+  pivot_longer(cols = c(-mirs), names_to = "Case_ID", values_to = "Reads") %>% 
+  left_join(pDat, by = "Case_ID") %>% 
+  mutate(Trimester = fct_relevel(Trimester, c("1", "2", "3"))) %>% 
+  dplyr:: rename("miRNA" = "mirs")
+
+
+```
+
+### **3.0 EDA on Smith Data**  
+
+First, **go through Melanie's script again and describe her analysis steps** (i.e., what type of filtering did she use, normalization, etc.)   
+- She removes samples with the lowest reads 
+- simplifies and changes naming of the samples
+- converts the table into a dataframe
+- removes multimapped miRNA with identical mature sequences
+- from metadata, she removes the impure samples
+- normalization via TMM (Trimmed Mean of M ) of libraries
+- removing biological noise by removing sample with less then 2.5 cmp of their log 2 cpm counts
+- pass to removeBatchEffect and remove miRNA with identical sequences
+
+
+
+**Is there a correlation between Sex and Oxygenation? Make a table and plot + run and a test**  
+*Hint: Which test you would run to compare 2 categorical variables?*   
+
+```{r}
+
+oxy_sex <- table (smith_mDat$oxygenation, smith_mDat$Sex) %>% 
+  chisq.test() 
+ 
+smith_mDat %>%  
+  ggplot (aes(x = oxygenation,  fill = Sex))+
+  geom_bar(stat ="count",position = position_dodge2(preserve = "single")) +
+  my_theme +
+  scale_fill_manual(values = colpal$Sex)+
+  labs(title = "Oxygenation vs Sex")
+
+
+
+#X-squared = 2.8393, df = 1, p-value = 0.09198
+#results are not significant hence there is not a correlation between Sex and Oxygenation
+
+```
+
+
+#### **3.1** PCA  
+
+**Do the following:**  
+
+- Run PCA with Trimester, Sex, Oxygenation, and processGroup  
+- Make a bar plot of the first 10 PCs
+- Make the pval and R-square plots only for the first 10 PCs (*Hint*: Use `dplyr::slice`)
+- Plot the PCs by the variables (Make sure the axes are equal)  
+
+**Q1. How many PCs seem to denote the highest variation?**  
+PC1 and PC2
+
+**Q2. Which variable seems to most significantly contribute towards the variation in the data?**  
+Process group
+
+**Q3. Which 2 variables show an overlap from the PCA plots?**  
+Trimester, Sex, Oxygenation
+
+```{r}
+# smith_eLog <- log2(smith_eNorm +1 )
+
+t_eLog <- as.data.frame(t(smith_eNorm))
+
+pca_smith <- prcomp(t_eLog, scale = FALSE, center = TRUE)
+
+scores_sm <- pca_smith$x
+
+summary(pca_smith)
+
+summary_smith <- data.frame(PC = 1:94, 
+                      var_explained = (pca_smith$sdev)^2 / sum((pca_smith$sdev)^2), 
+                      cumulative = cumsum(pca_smith$sdev^2 / sum(pca_smith$sdev^2))
+                      )
+
+summary_smith <- summary_smith %>% 
+  mutate(cumulative_perc = cumulative*100) 
+
+
+
+```
+
+
+```{r}
+
+cum_bar <- summary_smith %>%
+  slice_head(n=10) %>% 
+  ggplot(aes(x = PC, y = cumulative_perc)) +
+  geom_bar(stat = "identity", fill = "forest green")+
+  coord_cartesian(y = c(0,250)) +
+  scale_y_continuous(breaks = seq(0,100,10), expand = c(0, 0)) +
+  theme_minimal() +
+  labs(title = "Cumulative Explained by each PC", x = "Principal Components", y = "Variance Explained", caption = "Normalized Counts")
+
+var_bar<- summary_smith %>%
+  slice_head(n=10) %>% 
+  ggplot(aes(x = PC, y = var_explained*100)) +
+  geom_bar(stat = "identity", fill = "forest green") +
+  coord_cartesian(y = c(0,100)) +
+  scale_y_continuous(breaks = seq(0,100,10), expand = c(0, 0)) +
+  theme_minimal() +
+  labs(title = "Variance Explained by each PC", x = "Principal Components", y = "Variance Explained", caption = "Normalized Counts")
+
+
+ggarrange(cum_bar, var_bar, nrow=1, ncol=2)
+```
+
+
+
+```{r}
+
+smith_mDat_cor <- smith_mDat %>% 
+  dplyr::select(Trimester, Sex, oxygenation,processGroup) 
+
+smith_mDat_cor <- plomics::lmmatrix(dep = scores_sm, ind = smith_mDat_cor, metric = "Pvalue")
+
+
+smith_mDat_cor <- t(smith_mDat_cor) 
+
+smith_mDat_cor_10 <- smith_mDat_cor %>% 
+  as.data.frame %>% 
+  dplyr:: slice_head(n=10)
+
+
+smith_mDat_cor %>% 
+  as.data.frame() %>% 
+  mutate(across(everything(), round, 3)) %>% 
+  mutate(across(everything(), ~cell_spec(.x, color = ifelse(.x <= 0.05, "green", "")))) %>% 
+  kable(escape = F) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", full_width = F, fixed_thead = T))
+
+
+
+pc_plot <- smith_mDat_cor_10 %>% 
+  mutate(Principal_Component = rownames(smith_mDat_cor_10), PC = as.factor(1:10)) %>% 
+  pivot_longer(cols = -c(Principal_Component, PC), names_to = "Variable", values_to = "pval") %>%
+  mutate(pval_cat = factor(case_when(
+    pval > 0.05  ~ "> 0.05",
+    pval < 0.05 & pval > 0.01 ~ "< 0.05",
+    pval < 0.01 & pval > 0.001 ~ "< 0.01",
+    pval < 0.001 ~ "< 0.001"), 
+    levels = c("> 0.05", "< 0.05", "< 0.01", "< 0.001")))
+
+#making a colour palette for the above plot
+pc_colpal <- c("white", "#c7dfba", "#8ebe78", "#509e36")
+# setting the levels of the pval_cat factor column to the colours in pc_colpal
+names(pc_colpal) <- levels(pc_plot$pval_cat)
+
+pval_smith <- pc_plot %>% 
+  ggplot(aes(x = PC, y = Variable , fill = pval_cat)) +
+  geom_tile(col = "lightgray") +
+  theme_bw() +
+  scale_x_discrete(expand = c(0, 0)) + #expand function fits the plot to its assigned dimesions 
+  scale_y_discrete(expand = c(0, 0)) +
+  scale_fill_manual(values = pc_colpal)  + 
+  coord_fixed() + # very important otherwise height of each tile is elongated!
+  labs(title = "Contribution of Variables to Observed Expression\n", x = "", y = "", fill = "P value")
+
+```
+
+
+
+```{r}
+pc_rsq_sm <- lmmatrix(dep = scores_sm, ind = smith_mDat_cor, metric = "Rsquared")
+
+pc_rsq_sm_1 <- t(pc_rsq_sm) 
+
+pc_rsq_sm_10 <- pc_rsq_sm_1  %>% 
+  as.data.frame %>% 
+  slice_head(n=10)
+
+rsq_plot <- pc_rsq_sm_10 %>% 
+  mutate(Principal_Component = rownames(pc_rsq_sm_10), PC = as.factor(1:10)) %>% 
+  pivot_longer(cols = -c(Principal_Component, PC), names_to = "Variable", values_to = "rsq")
+
+rsq_smith <- rsq_plot %>% 
+  ggplot(aes(x = PC, y = Variable , fill = rsq)) +
+  geom_tile(col = "lightgray") +
+  theme_bw() +
+  scale_x_discrete(expand = c(0, 0)) + #expand function fits the plot to its assigned dimesions 
+  scale_y_discrete(expand = c(0, 0)) +
+  scale_fill_gradient(low = "white", high = "#509e36") +
+  coord_fixed() + # very important otherwise height of each tile is elongated!
+  labs(x = "", y = "", fill = "Rsq")
+
+
+ggarrange(pval_smith, rsq_smith, nrow = 2, ncol = 1) 
+
+
+
+```{r}
+
+
+scores_sm <- scores_sm %>% 
+  as.data.frame() %>% 
+  rownames_to_column("samplename")
+
+smith_mDat_pc <- smith_mDat %>% 
+  left_join (scores_sm, by = "samplename")
+
+pc1_pc2_1 <- smith_mDat_pc %>% 
+  ggplot(aes(x = PC1, y = PC2 , color = Trimester)) +
+  geom_point()+
+ theme_minimal() +
+  coord_cartesian(x = c(-40,40), y = c(-40,40)) +
+    labs(title = "Trimester")
+  
+
+pc1_pc2_2 <- smith_mDat_pc  %>% 
+  ggplot(aes(x = PC1, y = PC2 , color = Sex)) +
+  geom_point()+
+  theme_minimal() +
+   coord_cartesian(x = c(-40,40), y = c(-40,40))+
+    labs(title = "Sex")
+  
+pc1_pc2_3 <- smith_mDat_pc %>% 
+  ggplot(aes(x = PC1, y = PC2 , color = oxygenation)) +
+  geom_point()+
+  theme_minimal() +
+  coord_cartesian(x = c(-40,40), y = c(-40,40)) +
+    labs(title = "Oxygenation")
+
+
+pc1_pc2_4<- smith_mDat_pc %>% 
+  ggplot(aes(x = PC1, y = PC2 , color = processGroup)) +
+  geom_point()+
+  theme_minimal() +
+  coord_cartesian(x = c(-40,40), y = c(-40,40)) +
+  labs(title = "Process Group")
+
+ggarrange(pc1_pc2_1, pc1_pc2_2,pc1_pc2_3, pc1_pc2_4, nrow = 2, ncol = 2)
+
+```
+
+**CHECKPOINT: PC1 should be contributing 40% of the variance**  
+
+
+
+### **4.0 Compare DEmiRNA Expression**   
+
+#### **4.1 Robinson DEmiRNAs**  
+
+**Join the 17 DEmiRNAs to their normalized expression**  
+
+```{r}
+eNorm_log2 <- eNorm_log2%>%
+  rownames_to_column(var="miRNA") 
+
+common_hm <- common_DEmiRNAs %>% 
+  inner_join(eNorm_log2, by = "miRNA")
+
+```
+
+I've added a file called `miRNA_genomic_coordinates.xlsx` which has the details of which chromosome the miRNA lies on, whether it is intronic or exonic, and which is the closest upstream gene to the miRNA if it is intronic.  
+
+**Make a separate df that contains the above information for these 17 miRNAs**  
+
+You'll see that the miRNAs listed are precursors, so **read in the eDat file, and join the precursor names to the mature**
+
+
+```{r}
+
+eDat_sp <- eDat %>% 
+  rownames_to_column(var="precursor:miRNA") %>% 
+  separate("precursor:miRNA", c("precursor", "miRNA"), ":") %>%
+  select (precursor:miRNA) %>% 
+  distinct
+
+ 
+
+common_DEmiRNAs_pr <- common_DEmiRNAs   %>% 
+  left_join(eDat_sp ,by = "miRNA" ) 
+
+
+
+common_hm_stats <- read_excel(here::here("data", "miRNA_genomic_coordinates.xlsx")) %>% 
+  select(mirbase_symbol,chromosome, intragenic_type, distance_from_upstream_exon) %>% 
+  dplyr:: rename ("precursor" = "mirbase_symbol" ) %>% 
+  inner_join(common_DEmiRNAs_pr, by = "precursor")
+
+
+```
+
+**Make boxplots of these 17 miRNAs, fill = trimester, and add `facet_grid(cols = vars(chromosome), scale = "free_x")`**
+
+```{r,fig.height=7}
+#fig.width=35, fig.height=15
+# fig.width=25, fig.height=6
+common_hm_stats_eNorm <- common_hm_stats %>% 
+  inner_join(eNorm_plot, by = "miRNA")
+
+common_hm_stats_eNorm_a <- common_hm_stats_eNorm %>% 
+  filter (chromosome == "chr1" | chromosome == "chr3" | chromosome == "chr5" | chromosome ==  "chr7" | chromosome =="chr9")
+  
+common_hm_stats_eNorm_b <- common_hm_stats_eNorm %>% 
+  filter(chromosome == "chr13" | chromosome == "chr14")
+
+common_hm_stats_eNorm_c<-common_hm_stats_eNorm %>% 
+  filter(chromosome == "chr15" |chromosome == "chrX")
+
+
+gr_a <- common_hm_stats_eNorm_a%>% 
+  ggplot(aes (x = miRNA, y= Reads, fill = Trimester))+
+  geom_boxplot() +
+  my_theme +
+  scale_fill_manual(values =  colpal$Trimester)+
+  facet_wrap(~miRNA)+
+   theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 4))+
+  facet_grid(cols = vars(chromosome), scale = "free_x")
+
+gr_b <- common_hm_stats_eNorm_b %>% 
+  ggplot(aes (x = miRNA, y= Reads, fill = Trimester))+
+  geom_boxplot() +
+  my_theme +
+  scale_fill_manual(values =  colpal$Trimester)+
+  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 4))+
+  facet_grid(cols = vars(chromosome), scale = "free_x")
+  
+
+
+gr_c <- common_hm_stats_eNorm_c %>% 
+  ggplot(aes (x = miRNA, y= Reads, fill = Trimester))+
+  geom_boxplot() +
+  my_theme +
+  scale_fill_manual(values =  colpal$Trimester)+
+    theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 4))+
+  facet_grid(cols = vars(chromosome), scale = "free_x",  space = "free")
+  
+
+
+ggarrange(gr_a ,gr_b,gr_c, nrow = 3, ncol = 1, common.legend = TRUE)
+
+
+
+```
+
+**Subset to plot the expression of only Chr 14 and Chr X**  
+
+```{r, fig.width=25, fig.height=6}
+ common_hm_stats_eNorm %>% 
+  subset( chromosome == "chr14" | chromosome == "chrX") %>% 
+  ggplot(aes (x = miRNA, y= Reads, fill = Trimester))+
+  geom_boxplot()+
+  my_theme +
+  scale_fill_manual(values =  colpal$Trimester)+
+  labs(title = "Expression of Common miRNA in Chromosome 14 and Chromosome X") +
+  facet_grid(cols = vars(chromosome), scale = "free_x")
+  
+
+```
+
+
+To plot a heatmap to show the differences in the gene expression, we'll first convert our eNorm log values to a [Z-score scale](https://www.simplypsychology.org/z-score.html)
+
+```{r}
+eNorm_log2<- eNorm_log2 %>% 
+  column_to_rownames(var="miRNA")
+
+common_hm <- as.data.frame(t(eNorm_log2))
+common_hm <- scale(eNorm_log2, center = TRUE, scale = TRUE)
+common_hm <- as.data.frame(t(eNorm_log2))
+
+```
+
+**Make a heatmap of the 17 common DEmiRNAs adding Trimester, flowCell, and RQS_cat**  
+
+```{r, fig.width=7, fig.height=6}
+common_DEmiRNAs_list <- common_DEmiRNAs %>% 
+  select (miRNA)
+
+common_DEmiRNAs$miRNA
+  
+  
+norm_cor_17 <- eNorm_log2 %>% 
+  rownames_to_column(var="miRNA") %>% 
+  left_join (common_DEmiRNAs_list, by = "miRNA") %>% 
+  column_to_rownames(var="miRNA") %>% 
+  cor()
+
+pDat <- pDat %>% 
+  column_to_rownames(var="Case_ID")
+
+norm_cor_17 %>% 
+  pheatmap::pheatmap(clustering_distance_cols = "euclidean", clustering_method = "complete", 
+                     cluster_rows = TRUE, show_colnames = TRUE, show_rownames = TRUE,
+                     annotation_col = pDat[c("Trimester", "flowCell","RQS")], annotation_row = pDat[c("Trimester", "flowCell","RQS")],
+                     main = "17 Common miRNA Sample Correlation")
+
+
+
+```
+
+Hmm, 4 T2 samples don't cluster together - that's most probably because we have a very low number of genes that we're comparing. If we were to add more genes, all the samples should cluster by trimester (as we saw in our PCA analysis)  
+
+
+Let's compare the expression of these 17 DEmiRNAs with the Smith data  
+
+**Make a combined plotting df for Robinson and Smith data for norm expression, Trimester, and Sex, and a data column specifying the lab** -  Relevel the data column to order Smith and Robinson  
+*Hint: Use thr `rbind` function to bind the Robinson and Smith data*  
+
+```{r}
+
+
+smith_eNorm_plot <- smith_eNorm %>% 
+  rownames_to_column(var="miRNA") %>% 
+  pivot_longer(cols = -c("miRNA"),names_to = "samplename", values_to = "Reads") %>% 
+  left_join(smith_mDat, by = "samplename") %>% 
+  dplyr:: select (miRNA, Trimester, Sex, Reads) %>% 
+   mutate (lab = "Smith") %>% 
+   mutate(Trimester = str_replace(Trimester, 'Trimester', "")) %>% 
+   mutate(Trimester = fct_relevel(Trimester, c("1", "2")))
+
+
+
+eNorm_plot_cb <- eNorm_plot %>% 
+  dplyr:: select(miRNA, Trimester, Sex, Reads) %>% 
+   mutate (lab = "Robinson")
+
+
+combined_plots <-rbind(smith_eNorm_plot, eNorm_plot_cb) %>% 
+  mutate (lab = fct_relevel(lab)) 
+
+
+
+
+```
+
+**CHECKPOINT: You should have 239608 rows and 5 columns in your `combined_plots` df**  
+I have 238,574 rows and 5 columns
+
+**Filter/Join to only keep the expression for the 17 DEmiRNAs** -  Make sure to use only the trimester 1 and 2 samples, as the Smith study did not include trimester 3 samples.
+
+```{r}
+
+common_plots <- combined_plots%>% 
+  inner_join(common_DEmiRNAs , by = "miRNA") %>% 
+  filter (Trimester != 3)
+
+
+```
+
+Let's try to find if the differences that we see between Robinson and Smith data is significant per trimester  
+
+**Filter to keep either Trimester 1 or 2, x = data, fill = data, use the `stat_compare_means` argument, and move the legend to the bottom of the plot, instead of the default on the right** - stat_compare_means requires specifying the variables (here, our data variable) that you want to compare on the X-axis. 
+
+```{r  common plots, fig.width=10, warning=FALSE, error=FALSE}
+
+ 
+library(ggpubr)
+my_comparisons <- list(c("Robinson","Smith"))
+  
+
+ 
+common_plots %>%
+  filter (Trimester != 1) %>% 
+  ggplot(aes(x = lab, y = Reads, fill = lab, colour = lab)) +
+  geom_boxplot(alpha = 0.8, position = position_dodge2(preserve = "single")) +
+  scale_fill_manual(values = c("#499471", "#ee686d")) +
+  scale_colour_manual(values = c("#499471", "#ee686d")) +
+  stat_compare_means(comparisons = my_comparisons) +
+  coord_cartesian(y = c(0,25)) +
+  theme_minimal() +
+  facet_wrap(~miRNA) +
+  theme(legend.position = "bottom") +
+  labs(title = "Comparing Robinson DEmiRNAs with Smith Data: Trimester 2", subtitle = "17 DEmiRNAs")
+
+
+common_plots %>%
+  filter (Trimester != 2) %>% 
+  ggplot(aes(x = lab, y = Reads, fill = lab, colour = lab)) +
+  geom_boxplot(alpha = 0.8, position = position_dodge2(preserve = "single")) +
+  scale_fill_manual(values = c("#499471", "#ee686d")) +
+  scale_colour_manual(values = c("#499471", "#ee686d")) +
+  stat_compare_means(comparisons = my_comparisons) +
+  coord_cartesian(y = c(0,25)) +
+  theme_minimal() +
+  facet_wrap(~miRNA) +
+  theme(legend.position = "bottom") +
+  labs(title = "Comparing Robinson DEmiRNAs with Smith Data: Trimester 1", subtitle = "17 DEmiRNAs")
+ 
+ common_plots %>%
+  filter (Trimester != 3) %>% 
+  ggplot(aes(x = lab, y = Reads, fill = lab, colour = lab)) +
+  geom_boxplot(alpha = 0.8, position = position_dodge2(preserve = "single")) +
+  scale_fill_manual(values = c("#499471", "#ee686d")) +
+  scale_colour_manual(values = c("#499471", "#ee686d")) +
+  stat_compare_means(comparisons = my_comparisons) +
+  coord_cartesian(y = c(0,25)) +
+  theme_minimal() +
+  facet_wrap(~miRNA, ncol = 3) +
+  theme(legend.position = "top",plot.title = element_blank()) +
+  labs(title = "Comparing Robinson DEmiRNAs with Smith Data: Trimester 1 and 2 ")
+
+
+
+
+
+```
+
+**Based on the above two plots and the pvalues, which miRNAs show similar expression across both studies?**  
+hsa-miR-370-3p with a pvalue of 0.29 in trimester 1 and 2.
+
+In trimester 2, hsa-miR-363-3p,hsa-miR-433-3p, hsa-miR-767-3p.
+
+In trimester 1, hsa-miR-105-5p,hsa-miR-767-5p,hsa-miR-370-3p.
+
+#### **4.2 Smith DEmiRNAs** 
+
+**Compare the normalized expression of the top 10 DEmiRNAs found in the Smith study using `combined_plots`** - Make the same plots as above, separate for both Trimester 1 and 2. 
+
+```{r, fig.width=10,  warning=FALSE, error=FALSE}
+
+smith_de <- c(
+"hsa-miR-30d-5p",
+"hsa-miR-125a-5p",
+"hsa-miR-517a-3p",
+"hsa-miR-199a-3p",
+"hsa-miR-26b-5p",
+"hsa-miR-26a-5p",
+"hsa-let-7a-5p",
+"hsa-miR-21-5p",
+"hsa-miR-126-3p",
+"hsa-miR-516b-5p"
+)
+
+
+combined_plots %>% 
+  filter (miRNA == smith_de) %>% 
+  filter (Trimester != 1) %>% 
+  ggplot(aes(x = lab, y = Reads, fill = lab, colour = lab)) +
+  geom_boxplot(alpha = 0.8, position = position_dodge2(preserve = "single")) +
+  scale_fill_manual(values = c("#499471", "#ee686d")) +
+  scale_colour_manual(values = c("#499471", "#ee686d")) +
+  stat_compare_means(comparisons = my_comparisons) +
+  coord_cartesian(y = c(0,25)) +
+  theme_minimal() +
+  facet_wrap(~miRNA) +
+  theme(legend.position = "bottom") +
+  labs(title = "Comparing top 10 Smith DEmiRNA: Trimester 2", subtitle = "17 DEmiRNAs")
+
+
+ combined_plots %>% 
+  filter (miRNA == smith_de) %>% 
+  filter (Trimester != 2) %>% 
+  ggplot(aes(x = lab, y = Reads, fill = lab, colour = lab)) +
+  geom_boxplot(alpha = 0.8, position = position_dodge2(preserve = "single")) +
+  scale_fill_manual(values = c("#499471", "#ee686d")) +
+  scale_colour_manual(values = c("#499471", "#ee686d")) +
+  stat_compare_means(comparisons = my_comparisons) +
+  coord_cartesian(y = c(0,25)) +
+  theme_minimal() +
+  facet_wrap(~miRNA) +
+  theme(legend.position = "bottom") +
+  labs(title = "Comparing top 10 Smith DEmiRNA: Trimester 1", subtitle = "17 DEmiRNAs")
+
+ 
+ combined_plots %>% 
+  filter (miRNA == smith_de) %>% 
+  filter (Trimester != 3) %>% 
+  ggplot(aes(x = lab, y = Reads, fill = lab, colour = lab)) +
+  geom_boxplot(alpha = 0.8, position = position_dodge2(preserve = "single")) +
+  scale_fill_manual(values = c("#499471", "#ee686d")) +
+  scale_colour_manual(values = c("#499471", "#ee686d")) +
+  stat_compare_means(comparisons = my_comparisons) +
+  coord_cartesian(y = c(0,25)) +
+  theme_minimal() +
+  facet_wrap(~miRNA) +
+  theme(legend.position = "bottom") +
+  labs(title = "Comparing top 10 Smith DEmiRNA: Trimester 1 and 2", subtitle = "17 DEmiRNAs")
+
+
+
+
+```
+
+
+**Based on the above two plots, which miRNAs show similar expression across both studies?**  
+Trimester  2  hsa-miR-7a-5p 
+
+**Select only the one miRNA which shows no diff in exp and redo the plot** - add the argument `caption` within `labs` and write down how many samples are present for each study
+
+```{r}
+
+common_plots %>%
+  filter (Trimester != 2) %>%
+  filter (miRNA  == "hsa-miR-370-3p") %>% 
+  ggplot(aes(x = lab, y = Reads, fill = lab, colour = lab)) +
+  geom_boxplot(alpha = 0.8, position = position_dodge2(preserve = "single")) +
+  scale_fill_manual(values = c("#499471", "#ee686d")) +
+  scale_colour_manual(values = c("#499471", "#ee686d")) +
+  stat_compare_means(comparisons = my_comparisons) +
+  coord_cartesian(y = c(0,25)) +
+  theme_minimal() +
+  facet_wrap(~miRNA) +
+  theme(legend.position = "bottom") +
+  labs(title = " DEmiRNAs with no change in expression", caption = "Smith: 94, Robinson:40")
+
+
+
+common_plots %>% 
+  filter(Trimester!=2) %>% 
+  ggplot(aes(x = lab, y = Reads, fill = lab, colour = lab)) +
+  geom_boxplot(alpha = 0.8, position = position_dodge2(preserve = "single")) +
+  scale_fill_manual(values = c("#499471", "#ee686d")) +
+  scale_colour_manual(values = c("#499471", "#ee686d")) +
+  stat_compare_means(comparisons = my_comparisons) + 
+  coord_cartesian(y = c(0,25)) +
+  theme_minimal() +
+  facet_wrap(~miRNA) +
+  theme(legend.position = "bottom") +
+  labs(title = "Comparing Robinson DEmiRNAs with Smith Data: Trimester 1", subtitle = "17 DEmiRNAs")
+
+```
+
+#### **4.3 miRNA Clusters**
+
+I've added an excel file that has the 3 major miRNA clusters showing expression in the placenta - we'll just be looking at C14MC and C19MC  
+
+**Separate the clusters to make new dfs of the respective cluster** 
+
+```{r}
+
+clusters <- read_excel(here::here("data", "miRNA_Clusters.xlsx"))
+
+c14 <- clusters %>% 
+ filter(grepl ("14", cluster) )
+
+c19 <-  clusters %>% 
+ filter(grepl ("19", cluster) )
+  
+```
+
+We're going to check how much of the total miRNA expression we see is by the clusters, i.e., the proportion of expression of these clusters within each of our samples 
+
+**Get the total reads for all miRNAs per sample within eNorm**  
+*Hint* - Use the `colsums` function
+
+```{r}
+
+colsums_roblab <- eNorm_log2 %>% 
+  colSums (.) %>% 
+  as.data.frame()
+
+```
+
+**Get the total reads for the C14MC and C19MC miRNAs per sample**
+
+```{r}
+
+eNorm_log2 <- eNorm_log2 %>% 
+  rownames_to_column("miRNA")
+
+c14_mirs <- c14 %>% 
+  dplyr::select(miRNA) %>% 
+  left_join(eNorm_log2, by = "miRNA") 
+  
+
+```
+
+You'll see that the df is mostly empty - can you guess why?  
+
+We'll make a separate df from eNorm which removes the `-3p` and `-5p` from the end of the miRNA - making them the precursor version of the miRNA.  
+
+We'll use the `str_replace_all` function:  
+
+```{r}
+
+eNorm_pre <- eNorm_log2 
+
+eNorm_pre$miRNA <-  str_replace_all(eNorm_pre$miRNA , pattern = "-5p", replacement = "") 
+eNorm_pre$miRNA <-  str_replace_all(eNorm_pre$miRNA , pattern = "-3p", replacement = "") 
+
+c14_mirs <- c14 %>% 
+  dplyr::select(miRNA) %>% 
+  left_join(eNorm_pre, by = "miRNA") %>% 
+  rename("precursor" = "miRNA")
+
+# removing the rows with NA
+c14_mirs <- na.omit(c14_mirs) 
+
+
+#do the same for c19
+c19_mirs <- c19 %>% 
+  dplyr::select(miRNA) %>% 
+  left_join(eNorm_pre, by = "miRNA")%>% 
+  rename("precursor" = "miRNA")
+
+
+c19_mirs <- na.omit(c19_mirs)
+```
+
+**Get the total reads for both c14 and c19**  
+
+```{r, al=FALSE}
+
+# c14_colsums <- as.data.frame(colSums(c14_mirs))
+# 
+# c19_colsums <- as.data.frame(colSums(c19_mirs))
+
+```
+
+You should get an error here: `Error in colSums(c14_prop) : 'x' must be numeric`. That's because we have our miRNAs in a column, so our df is not completely a numerical one. 
+
+**Go ahead and try converting miRNAs into rownames**  
+
+```{r}
+# c19_mirs <- c19_mirs %>%  
+#   as.data.frame() %>% 
+#   column_to_rownames("miRNA")
+
+
+```
+
+
+You'll get an error stating `Error in .rowNamesDF<-(x, value = value) :  duplicate 'row.names' are not allowed` -- and that's because we converted our mature miRNAs to precursor to be able to join the cluster and eNorm dfds above.  
+
+**Get the colsums of c14 and c19 by using data manipulation functions of your choosing**  
+
+```{r}
+
+list_mirna_14 <- c14_mirs$precursor
+
+colsums_c14 <- c14_mirs %>% 
+  select (-precursor) %>% 
+  colSums(.) %>% 
+  as.data.frame()
+
+
+list_mirna_19 <- c19_mirs$precursor
+
+colsums_c19 <- c19_mirs %>% 
+  select (-precursor) %>% 
+  colSums(.) %>% 
+  as.data.frame()
+
+```
+
+**Create a  stacked bar plot for each sample showing the total number of reads, and the proportion of C14 and C19 within them by percentage** - The total bar chart should add up to a 100 (%)
+
+```{r, fig.width=15, fig.height=5}
+
+all_colsums <- cbind(colsums_roblab, colsums_c14, colsums_c19) 
+colnames(all_colsums) <- c("Total", "C14MC", "C19MC") 
+
+all_colsums_C19 <- all_colsums %>% 
+  rownames_to_column(var="samples")  %>% 
+  mutate(Clusters = "C19_p")
+
+
+all_colsums_C14 <- all_colsums %>% 
+  rownames_to_column(var="samples")  %>% 
+  mutate(Clusters = "C14_p")
+
+all_colsums_total <- all_colsums %>% 
+   rownames_to_column(var="samples")  %>% 
+   mutate(Clusters = "rest_p")
+
+
+all_colsums_up <- bind_rows (all_colsums_C19 ,all_colsums_C14,all_colsums_total)
+
+
+all_colsums_up <- all_colsums_up %>% 
+  mutate(Percentage = case_when(
+    Clusters == "C19_p" ~ C19MC*100/Total,
+     Clusters =="C14_p" ~ C14MC*100/Total,
+     Clusters == "rest_p" ~ (Total-C14MC-C19MC)*100/Total))
+
+   
+all_colsums_up %>%
+  ggplot( aes( x = samples, y = Percentage, fill = Clusters )) +
+    geom_bar(position="fill", stat="identity")+
+    scale_y_continuous(labels = scales::percent_format())
+
+
+```
+
+**Let's plot all the miRNAs within each cluster by trimester and also by sex**
+
+However, now that we have the precursor, all our mature miRNAs will be grouped into one miRNA. And we can't just add a -3p and -5p to the ends of the precursors, because some miRNAs don't have a 3p or 5p version (they just have the one version)  
+
+**Join the precursors to the mature miRNA names**  
+
+You'll see that when you try to join, you don't get any matches, but when you view the df and search, the miRNAs match - can you figure out why the df returned has no matches?  
+
+**Fix the error on why the dfs aren't joining**  
+*Hint: Look at the spelling of the miRNAs carefully. And it's a new function that I've introduced in this script somewhere above*    
+
+
+```{r}
+
+eDat_up <-  eDat %>% 
+  rownames_to_column(var = "pre:miRNA") 
+
+pre_mature <-eDat_up %>% 
+  select ("pre:miRNA") %>% 
+   separate("pre:miRNA", c("precursor", "miRNA"), ":") 
+
+pre_mature$precursor <-  str_replace_all(pre_mature$precursor   , pattern = "mir", replacement = "miR") 
+
+#C19 cluster
+c19_mirs$precursor  <- str_replace_all(c19_mirs$precursor   , pattern = "mir", replacement = "miR") 
+
+c19_mirs_joined <- c19_mirs %>% 
+    left_join(pre_mature, by = "precursor")  %>% 
+    pivot_longer(cols = -c("miRNA", "precursor"),names_to = "Case_ID", values_to = "Reads")
+
+#C14 cluster
+
+c14_mirs$precursor  <- str_replace_all(c14_mirs$precursor   , pattern = "mir", replacement = "miR") 
+
+c14_mirs_joined <- c14_mirs %>% 
+    left_join(pre_mature, by = "precursor")  %>% 
+    pivot_longer(cols = -c("miRNA", "precursor"),names_to = "Case_ID", values_to = "Reads")
+
+```
+
+**Plot the C14MC and C19MC clusters by trimester/sex and facet by miRNA**  
+
+```{r, warning=FALSE, error=FALSE, fig.width=25, fid.height = 25}
+trimester_sex <- eNorm_plot %>% 
+  select(miRNA, Trimester, Sex)
+
+c19_mirs_joined_eNorm <- c19_mirs_joined %>% 
+  left_join (trimester_sex, by = "miRNA")
+
+c19_mirs_joined<- c19_mirs_joined %>% 
+  left_join (mDat, by = "Case_ID")  #when combined with the timester_sex  df I got NA
+
+c14_mirs_joined <- c14_mirs_joined %>% 
+  left_join (mDat, by = "Case_ID")
+
+c19_mirs_joined %>% 
+  dplyr::count(Trimester = NA)
+
+c19_mirs_joined%>% 
+  # filter (!is.na(c19_mirs_joined$miRNA)) %>% #filtering NA that I got from trimester_sex df
+  ggplot (aes( y = Reads, color = Trimester))+
+  geom_boxplot() +
+  my_theme +
+  scale_fill_manual(colpal$Trimester) +
+  coord_cartesian(y = c(0,20))+
+  facet_wrap(~miRNA) +
+  labs(title = " Expression of microRNAs in C19 cluster by Trimester")
+
+
+c19_mirs_joined%>% 
+  ggplot (aes( y = Reads, color = Sex))+
+  geom_boxplot() +
+  my_theme +
+  scale_fill_manual(colpal$Sex) +
+  coord_cartesian(y = c(0,20))+
+  facet_wrap(~miRNA) +
+  labs(title = " Expression of microRNAs in C19 cluster by Sex")
+
+c14_mirs_joined%>% 
+  ggplot (aes( y = Reads, color = Trimester))+
+  geom_boxplot() +
+  my_theme +
+  scale_fill_manual(colpal$Trimester) +
+  coord_cartesian(y = c(0,20))+
+  facet_wrap(~miRNA) +
+  labs(title = " Expression of microRNAs in C14 cluster by Trimester")
+
+
+c14_mirs_joined%>% 
+  ggplot (aes( y = Reads, color = Sex))+
+  geom_boxplot() +
+  my_theme +
+  scale_fill_manual(colpal$Sex) +
+  coord_cartesian(y = c(0,20))+
+  facet_wrap(~miRNA) +
+  labs(title = " Expression of microRNAs in C14 cluster by Sex")
+
+```
+
+
+```{r}
+limma::removeBatchEffect(cpm(DGEList_norm, log = TRUE), 
+                                                   design = design_gestation, 
+                                                   batch = sampleMeta_norm$processGroup)
+```
+
+***  
+
+> You're done with your project!  
+
+***  
