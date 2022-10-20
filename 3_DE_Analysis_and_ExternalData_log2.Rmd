@@ -1,0 +1,764 @@
+---
+title: "SSRP: Differential Analysis"
+author: "Fidan Sadig"
+output:
+  html_document:
+    keep_md: yes
+    highlight: haddock #tango, pygments, kate, monochrome, espresso, zenburn, haddock, textmate
+    toc: true
+    toc_depth: 4
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+    theme: sandstone  #cosmo, paper, lumen, sandstone, simplex, yeti, cerulean, journal, flatly, darkly, readable, spacelab, united
+editor_options: 
+  chunk_output_type: console
+---  
+
+***  
+
+### **Script #2 Extras** 
+
+
+```{r}
+#copying all the data from the previous script is too much
+
+#here are the updated lines:
+
+# var_gr <- summary %>%
+#   ggplot(aes(x = PC, y = var_explained)) +
+#   geom_bar(stat="identity") +
+#   theme_minimal()+
+#   theme(legend.position = "none")  +
+ 
+# cum_gr <- summary %>%
+#   ggplot(aes(x = PC, y = cumulative_perc)) +
+#   geom_bar(stat="identity") +
+#    theme_minimal()+
+#   theme(legend.position = "none")  +
+#   labs(title = "Normalized Gene Expression")
+# 
+# 
+# ggarrange(var_gr,cum_gr, nrow = 1, ncol = 2)
+
+
+
+#does not work, not errors but also nothing is being displayed
+#a <- read_chunk ("2_QC.Rmd",from = c(626,662, 699), to = c(635,674, 714) )
+
+```
+
+
+***  
+
+### **0.0 Introduction**  
+
+Note: Okay, I forgot to ask you to save the `mDat` and `eNorm` objects from last time, so I've manually saved them within the `data` folder
+
+**I haven't labelled the code chunks for this script, or added any chunk or figure parameters, or provided any theme and colours  - go ahead and do so**  
+
+***  
+
+### **1.0 Loading Packages** 
+
+```{r packages}
+
+# rmarkdown packages
+library(knitr) 
+library(rmarkdown)
+library(devtools)
+
+# data wrangling packages
+library(tidyverse)
+library(reshape2)
+library(magrittr)
+library(stringr)
+
+# data loading packages
+library(readxl) 
+library(openxlsx)
+#library(here)
+
+# plotting/table packages 
+library(arsenal)
+library(janitor)
+library(kableExtra) 
+library(egg)
+library(RColorBrewer)
+library(ggpubr)
+
+# advanced genomic packages
+# remotes::install_github("wvictor14/plomics")
+library(plomics)
+
+library(BiocManager)
+# BiocManager::install("edgeR")
+library(edgeR)
+library(pheatmap)
+
+# BiocManager::install(c("limma", "edgeR", "DESeq2", "biomaRt", "miRBaseConverter", "multiMiR", "preprocessCore"))
+
+```  
+
+***
+
+### **2.0 Data**  
+
+Load in your `eDat`, `eNorm`, `pDat`, and `mDat` RDS objects  
+
+
+```{r datas}
+
+
+eDat <- readRDS(here::here("data", "eDat.RDS"))
+pDat <- readRDS(here::here("data", "pDat.RDS"))
+eNorm <- readRDS(here::here("data", "eNorm_log2.RDS"))
+mDat <- readRDS(here::here("data", "mDat.RDS"))
+
+
+
+eNorm_plot <- eNorm %>% 
+  rownames_to_column("mirs") %>% 
+  pivot_longer(cols = c(-mirs), names_to = "Case_ID", values_to = "Reads") %>% 
+  left_join(pDat, by = "Case_ID") %>% 
+  mutate(Trimester = fct_relevel(Trimester, c("1", "2", "3")))
+
+```
+
+
+### **3.0 Differential Expression**
+
+Now, when we want to get genes which show differential expression by a variable, we first need to decide which variables to control for ([either a confounder or covariate](https://www.straighthealthcare.com/confounder-covariate.html)) i.e., meaning that knowing that those variables do count towards the variability in expression that we see, we want to ensure that the results that we get are not driven by these other variables 
+
+
+![Confounder](https://ars.els-cdn.com/content/image/1-s2.0-S0085253815529748-gr1.jpg)
+![Confounder Example](https://ars.els-cdn.com/content/image/3-s2.0-B9780128142769000143-f14-02-9780128142769.jpg)
+
+From the `2_QC` script, we determined that the following variables contribute towards the variability in our data:  
+
+- Trimester 
+- flowCell  
+- RQS  
+- Processing_time
+
+So, if we want to see the genes differentially expressed by Trimester, then we have to control for the other 3 variables, and so on.  
+
+To do our differential expression analysis, we will use a statistical test called as [linear regression](https://www.jmp.com/en_ca/statistics-knowledge-portal/what-is-regression.html#:~:text=What%20is%20simple%20linear%20regression,input%20(or%20predictor)%20variable.) 
+
+To run this test, we first need to make a matrix, called the `model matrix` which includes the main variable by which we want to assess DE by and all the confounders that we are going to use in our model  
+
+#### **3.1 Trimester**  
+
+```{r matrix setup}
+
+tri_mat <- model.matrix(~Trimester + flowCell + RQS + Processing_time, data = pDat)
+
+```
+
+What you'll see now is all the variables that we want, along with the values for each sample, where 0 represents that variable is not present for the sample, and 1 indicating that it is. The intercept column is the baseline variable by which you're measuring the variable against - here by default it is Trimester 1   
+
+We're now going to fit the matrix to our normalized gene expression (make sure that the genes are rownames) and then apply an  additional method called as Empirical Bayes analysis - which updates the distribution of our results from the linear model based on something called as [prior probability](http://varianceexplained.org/r/empirical_bayes_baseball/), which is the original distribution of our data
+
+```{r adjusting the matrix}
+
+# fitting the linear model
+tri_fit <- lmFit(eNorm, design = tri_mat) 
+
+# Empirical Bayes
+tri_efit <- eBayes(tri_fit) #ignore the warning
+
+```
+
+And now, we're going to pull out the top 10 DE miRNAs, using the `topTable` function setting the following parameters:  
+
+
+
+- `coef = 1` = that we want trimester 1 as the variable 
+- `adjust.method = "BH"` = that we want to apply the Benjamini-Hochberg/False Discovery Method (FDR) method of [multiple tesing  correction](chrome-extension://efaidnbmnnnibpcajpcglclefindmkaj/https://physiology.med.cornell.edu/people/banfelder/qbio/resources_2008/1.5_GenespringMTC.pdf)  
+- `p.value <= 0.05` = keep only genes with an adjusted p-value of 0.05 or less  
+- `sort.by = "logFC"` = sort by highest to lowest log-fold-change 
+
+**What is a p-value? How do you decide if something is at a significant p-value or not?** 
+It is a value that can validate hypothesized vs observed data. Usually below 0.05 is considered significant.
+
+**What is fold change?**  
+It is a magnitude of expression change
+
+```{r ten_miRNA}
+
+topTable(tri_efit, adjust.method = "BH", coef = 1, p.value = 0.05, sort.by = "logFC")
+
+#to get the summary of number of significant and non-significant genes at our multiple testing parameters  
+decideTests(tri_efit, adjust.method = "BH", p.value = 0.05) %>% 
+  summary()
+
+# to get all the results, and not just the top 10 - you can also specify the name of the coefficient by looking at the model matrix column names (coef = "Trimester2")
+demirs_tri_1 <- topTable(tri_efit, adjust.method = "BH", coef = 1, p.value = 0.05, sort.by = "logFC", n = Inf)
+
+```
+
+What we've got now are miRNAs that are DE between Trimester 1 and Trimester 2+3 combined i.e., expressed differently in trimester 1 of the pregnancy in comparison to later on in pregnancy/the rest of the pregnancy (essentially a binary variable question)
+
+We're now going to make a Volcano Plot which shows us the distribution of our miRNAs by p-value and logFC - we'll include all the miRNAs, both significant and non  
+
+**Make a new column denoting whether a miR is significant or not significant at a p-value <= 0.05 and a logFC of either >=1 or <= -1** - Double check your case_when results, you're going to have to use multiple arguments to get the exact results from the pval + logFC combinations
+
+```{r volcano_plot}
+
+all_tri1 <- topTable(tri_efit, adjust.method = "BH", coef = 1, p.value = 1, sort.by = "logFC", n = Inf)
+
+all_tri1 <- all_tri1 %>% 
+    mutate(l2fc_filter = case_when(adj.P.Val <=0.05 & logFC >=1  ~ "S",
+                                   adj.P.Val  <= 0.05 & logFC <= -1 ~ "S",
+                                   adj.P.Val >= 0.05  &    logFC >=1 ~ "NS",
+                                   adj.P.Val >= 0.05  & logFC <= -1 ~ "NS",
+                                   
+                                   adj.P.Val >0.05  & between(logFC,-1,1) ~ "NS",
+                                   adj.P.Val <0.05 &  between(logFC,-1,1) ~ "NS"
+                                   
+  ))
+
+
+all_tri1 %>% 
+  ggplot(aes(x = logFC, y = adj.P.Val, colour = l2fc_filter)) +
+  geom_point() +
+  coord_cartesian(x = c(-6,6)) +
+  geom_vline(xintercept = c(-1, 1), color = "#999999") +
+  geom_hline(yintercept = 0.05, color = "#999999") +
+  scale_colour_manual(values = c("#999999", "#0099ff")) +
+  theme_minimal() +
+  labs(x = "logFC", y = "Pvalue", title = "Trimester 1 vs Trimester 2+3", subtitle = "Significant miRNAs (in blue) = BH corrected FDR <= 0.05 and logFC >= 1")
+
+
+```
+
+So, all our significant DEmiRs at adjusted pval <= 0.05 + logFC of >= 1 are coloured in blue - but that doesn't look like a volcano plot tho - to get better vizualization, this y-axis of type of plot is converted to -log10 scale (the negative value flips the scale, and the log10  enhances it)
+
+```{r log10_volcano_plot}
+
+all_tri1 %>% 
+  ggplot(aes(x = logFC, y = -log10(adj.P.Val), colour = l2fc_filter)) +
+  geom_point() +
+  coord_cartesian(x = c(-6,6)) +
+  geom_vline(xintercept = c(-1, 1), color = "#999999") +
+  geom_hline(yintercept = -log10(0.05), color = "#999999") +
+  scale_colour_manual(values = c("#999999", "#0099ff")) +
+  theme_minimal() +
+  labs(x = "logFC", y = "Pvalue", title = "Trimester 1 vs Trimester 2+3", subtitle = "Significant miRNAs (in blue) = BH corrected FDR <= 0.05 and logFC >= 1")
+
+```
+
+
+**Select the DEmiRNAs for trimester 2 and then trimester 3, and make their respective volcano plots**  
+
+```{r tri_2_&_3}
+
+all_tri2 <-  topTable(tri_efit, adjust.method = "BH", coef = 2, p.value = 1, sort.by = "logFC", n = Inf) %>% 
+  mutate(l2fc_filter = case_when(adj.P.Val <=0.05 & logFC >=1  ~ "S",
+                                   adj.P.Val  <= 0.05 & logFC <= -1 ~ "S",
+                                   adj.P.Val >= 0.05  &    logFC >=1 ~ "NS",
+                                   adj.P.Val >= 0.05  & logFC <= -1 ~ "NS",
+                                   
+                                   adj.P.Val >0.05  & between(logFC,-1,1) ~ "NS",
+                                   adj.P.Val <0.05 &  between(logFC,-1,1) ~ "NS"
+                                   
+  ))
+
+all_tri2%>% 
+  ggplot(aes(x = logFC, y = -log10(adj.P.Val), colour = l2fc_filter)) +
+  geom_point() +
+  coord_cartesian(x = c(-6,6)) +
+  geom_vline(xintercept = c(-1, 1), color = "#999999") +
+  geom_hline(yintercept = -log10(0.05), color = "#999999") +
+  scale_colour_manual(values = c("#999999", "#0099ff")) +
+  theme_minimal() +
+  labs(x = "logFC", y = "Pvalue", title = "Trimester 2")
+  
+
+all_tri3 <-topTable(tri_efit, adjust.method = "BH", coef = 3, p.value = 1, sort.by = "logFC", n = Inf) %>% 
+  mutate(l2fc_filter = case_when(adj.P.Val <=0.05 & logFC >=1  ~ "S",
+                                   adj.P.Val  <= 0.05 & logFC <= -1 ~ "S",
+                                   adj.P.Val >= 0.05  &    logFC >=1 ~ "NS",
+                                   adj.P.Val >= 0.05  & logFC <= -1 ~ "NS",
+                                   
+                                   adj.P.Val >0.05  & between(logFC,-1,1) ~ "NS",
+                                   adj.P.Val <0.05 &  between(logFC,-1,1) ~ "NS"
+                                   
+  ))
+
+all_tri3%>% 
+  ggplot(aes(x = logFC, y = -log10(adj.P.Val), colour = l2fc_filter)) +
+  geom_point() +
+  coord_cartesian(x = c(-6,6)) +
+  geom_vline(xintercept = c(-1, 1), color = "#999999") +
+  geom_hline(yintercept = -log10(0.05), color = "#999999") +
+  scale_colour_manual(values = c("#999999", "#0099ff")) +
+  theme_minimal() +
+  labs(x = "logFC", y = "Pvalue", title = "Trimester 3")
+
+
+
+```
+
+**Now, do the following:**  
+
+- **Filter to only keep the significant miRNAs in all three trimester comparisons**    
+
+```{r only_sig}
+
+tri_sig_1 <- all_tri1 %>% 
+  filter ((adj.P.Val <=0.05 & logFC >=1 ) | (adj.P.Val  <= 0.05 & logFC <= -1))
+
+tri_sig_2 <- all_tri2 %>% 
+   filter ((adj.P.Val <=0.05 & logFC >=1) |(adj.P.Val  <= 0.05 & logFC <= -1))
+  
+
+tri_sig_3 <- all_tri3 %>% 
+    filter ((adj.P.Val <=0.05 & logFC >=1 ) |(adj.P.Val  <= 0.05 & logFC <= -1))
+  
+  
+```
+
+- **Add a column to each of the dfs denoting the coefficient/trimester for which we selected to get the results**    
+
+```{r labelling}
+
+tri_sig_1 <- tri_sig_1  %>% 
+  mutate (Trimester = "1")
+
+tri_sig_2 <-tri_sig_2 %>% 
+   mutate (Trimester = "2")
+
+tri_sig_3 <- tri_sig_3 %>% 
+   mutate (Trimester = "3")
+  
+```
+
+- **Check if there are any common significant miRNAs between the three comparisons**    
+
+```{r common_microRNAs}
+
+# common_tri_1 <-merge(tri_sig_1, tri_sig_2, by="row.names")  %>%  # couldn't make it work with inner_join; it automatically creates a column                                                                      names row.names; I need to make it back into rows for the next step
+#   rename ("microRNA" = "Row.names")
+
+tri_sig_1 <- tri_sig_1%>% 
+  rownames_to_column(var="microRNA")
+tri_sig_2 <- tri_sig_2 %>% 
+    rownames_to_column(var="microRNA")
+tri_sig_3 <- tri_sig_3 %>% 
+   rownames_to_column(var="microRNA")
+  
+common_tri <- tri_sig_1 %>% 
+  inner_join(tri_sig_2, by = "microRNA") %>% 
+   inner_join(tri_sig_3, by = "microRNA")
+
+#the six DEmiRNAs
+#hsa-miR-143-3p, hsa-miR-30a-5p, hsa-miR-429	, hsa-miR-503-3p, hsa-miR-195-3p, hsa-miR-377-3p
+```
+
+**CHECKPOINT:** You should have:  
+
+- 340 miRNAs in tri_sig_1  
+- 20 miRNAs in tri_sig_2  
+- 27 miRNAs in tri_sig_3  
+- 6 common DEmiRNAs  
+
+- **Make a boxplot showing the normalized expression of the common DEmiRNAs by Trimester**     
+
+```{r normalized_common_expression}
+
+v_1 <- common_tri %>% 
+  filter (mirs == c("hsa-miR-143-3p", "hsa-miR-30a-5p", "hsa-miR-429","hsa-miR-503-3p","hsa-miR-195-3p","hsa-miR-377-3p")) %>% 
+  ggplot(aes(x = mirs, y = Reads, fill = Trimester)) +
+  geom_bar(stat="identity") +
+  theme_minimal() 
+ 
+common_tri %>% 
+  left_join(eNorm_plot, by = c("microRNA" = "mirs")) %>% 
+  ggplot(aes(x = mirs, y = Reads, fill = Trimester)) +
+  geom_boxplot() +
+  theme_minimal() 
+
+ggarrange(v_1,v_2, nrow=1, ncol=2) #I feel bar plot looks better
+
+#Selected the wrong data frame at the beginning
+# common_tri %>% 
+#   ggplot(aes(x = DEmiRNAs, y = logFC.x, fill = Trimester)) +
+#   geom_boxplot() +
+#   theme_minimal() 
+
+```
+
+**Is there any literature already present depicting a connection between these 6 miRNAs and the placenta? Briefly write down what you find, and link the relevant paper.**
+
+I couldn't find a paper mentioning all 6 microRNAs and I couldn't find articles mentioned some of them associated with placenta either. This is what I could find. Note: I need more time to thoroughly do research.  
+
+miR-143 are important in the development of macrosomia (https://www.mdpi.com/2073-4409/11/9/1588/htm)
+
+miR-30a-3p was increased significantly in the placenta of women with preeclampsia (https://www.sciencedirect.com/science/article/pii/S0002937817323335?casa_token=9UuEhurHc0YAAAAA:NidBFbKlOpDpQBXzdhDwLXJUjcAOFtncX_jH4bWLzMeYvxhwdbvV2fIOWkA3Tv8u5PNUXJWqWQc)
+
+Clinical sample analysis has revealed that miR-429 expression in preeclamptic placenta is higher than that in normal placenta, 
+(https://www.tandfonline.com/doi/full/10.1080/21655979.2021.1923238)
+
+Hsa-miR-503-5p, a mature miRNA derived from 5’ ends of pre-miR-503, has been proved to regulate cell proliferation, transformation, migration and invasion. (https://content.iospress.com/articles/cancer-biomarkers/cbm170585)
+
+
+#### **3.1.2 With Contrasts**    
+
+Now, this plot doesn't seem to make much sense, but given that we compared one trimester to the rest of the two *together*, we didn't select the miRNAs that showed a difference in expression in each trimester - e.g., Trimester 1 compared to Trimester 2+3 is different than Trimester 1 compared to Trimester 2 and Trimester 1 compared to Trimester 3  
+
+That's what we'll do now then - compare the differences separately by using a separate matrix within our linear model called a contrast matrix. This type of matrix is very useful when you want to compare timepoints or conditions by each of the values within that variable  
+
+```{r contrasts}
+
+conMat <- makeContrasts(
+  t2_vs_t1 = Trimester2 - Intercept,
+  t3_vs_t1 = Trimester3 - Intercept,
+  t3_vs_t2 = Trimester3 - Trimester2,
+  levels = tri_mat
+)
+
+
+con_fit <- contrasts.fit(tri_fit, conMat) %>% 
+  eBayes()
+
+topTable(con_fit, adjust.method = "BH", coef = 1, p.value = 0.05, sort.by = "logFC")
+
+decideTests(con_fit, adjust.method = "BH", p.value = 0.05) %>% 
+  summary()
+
+```
+
+**Make dfs of the significant DEmiRNAs as above, check if there are any common DEmiRNAs and plot a boxplot and dotplot by trimester for the common**  
+
+```{r, contrast_sig}
+
+t2_t1 <- topTable(con_fit, adjust.method = "BH", coef = 1, p.value = 1, sort.by = "logFC",n = Inf)
+t3_t1 <- topTable(con_fit, adjust.method = "BH", coef = 2, p.value = 1, sort.by = "logFC",n = Inf)
+t3_t2 <- topTable(con_fit, adjust.method = "BH", coef = 3, p.value = 1, sort.by = "logFC",n = Inf)
+  
+
+sig_t2_t1 <- t2_t1 %>% 
+   filter ((adj.P.Val <=0.05 & logFC >=1 ) | (adj.P.Val  <= 0.05 & logFC <= -1)) %>% 
+   rownames_to_column(var = "mirna")
+  
+
+sig_t3_t1 <- t3_t1 %>% 
+   filter ((adj.P.Val <=0.05 & logFC >=1 ) | (adj.P.Val  <= 0.05 & logFC <= -1)) %>% 
+   rownames_to_column(var = "mirna")
+
+sig_t3_t2 <- t3_t2 %>% 
+  filter ((adj.P.Val <=0.05 & logFC >=1 ) | (adj.P.Val  <= 0.05 & logFC <= -1)) %>% 
+   rownames_to_column(var = "mirna")
+  
+
+common_con_tri <- sig_t2_t1 %>% 
+  inner_join(sig_t3_t2, by = "mirna" )  %>% 
+  inner_join(sig_t3_t1, by = "mirna" )
+
+common_con_tri_plot<- common_con_tri %>% 
+  left_join(eNorm_plot, by = c("mirna" = "mirs")) 
+  
+common_con_tri %>% 
+  left_join(eNorm_plot, by = c("mirna" = "mirs")) %>% 
+   ggplot(aes(x = mirna, y = Reads, fill = Trimester)) + 
+   geom_boxplot(alpha=0.8) +
+   theme_minimal() 
+
+
+  # ggplot(aes(x = mirna, y = Reads, fill = Trimester)) +
+  # geom_bar(stat="identity") +
+  # theme_minimal() 
+
+ common_con_tri_plot %>% 
+  filter(mirna == "hsa-miR-515-5p") %>% 
+  ggplot(aes(x = mirna, y = Reads, fill = Trimester)) +
+  geom_boxplot() +
+  theme_minimal() 
+
+ common_con_tri_plot %>% 
+  filter(mirna == "hsa-miR-515-5p") %>% 
+  ggplot(aes(x=mirna, y = Reads,  fill = Trimester)) +
+  geom_point()+ #some dots were overlapping and dots were too small to be seen so had to add these lines
+  ylim(c(0, 3))
+
+
+```
+
+**CHECKPOINT:** You should have 1 common DEmiRNA 
+
+### 4.0 **Formatting the [Smith et al.,](https://www.tandfonline.com/doi/full/10.1080/15476286.2021.1963105) data**  
+
+I've downloaded the relevant files from Melanie Smith's GitHub into the `data/external/` folder, where:  
+
+- counts_placenta.txt = raw miRNA counts  
+- sampleMeta.txt = Meta data  
+- earlyPlacentamiRNA_SeqProfile = Melanie's workflow  
+
+If you go through her workflow script, you'll see that she has some initial formatting of the sample names for the `counts_placenta` raw expression data.  
+
+**Using relevant object names, read in the Melanie's data and apply the initial formatting steps that she did.** Can you improve her code? Does it need to be improved, or is it simple and clear enough?  
+
+```{r packages_external}
+#install.packages("pander")
+#install.packages("Rmisc")
+#install.packages("ggplotify")
+
+
+#Data manipulation
+library(plyr)
+library(reshape2)
+library(dplyr)
+library(tidyverse)
+library(pander)
+library(magrittr)
+
+#Differential expression
+library(edgeR)
+library(limma)
+library(Rmisc)
+
+#Visualisation
+library(RColorBrewer)
+library(ggplot2)
+library(ggrepel)
+library(ggplotify)
+library(pheatmap)
+library(ggpubr)
+library(xtable)
+library(here)
+
+`%notin%` <- Negate(`%in%`)
+
+countsPlacenta <- read.delim(here::here("data/external", "counts_placenta.txt"))
+
+```
+
+
+
+```{r external_filtering}
+
+#Copy pasted from their workflow 
+
+# drop sample Q131 and Q071 - low reads identified in FastQC
+countsPlacenta <- dplyr::select(countsPlacenta, -which(names(countsPlacenta) %in% c("Q131_merge_R1", "Q071_merge_R1"))) %>% 
+  column_to_rownames("mirna")
+
+# remove the "_merge_R1" from the sample name for simplification
+names(countsPlacenta) <- sub("_merge_R1","",names(countsPlacenta))
+
+# remove the "Q" prefix from the sample names and replace with PAC
+names(countsPlacenta) <- sub("Q","",names(countsPlacenta))
+
+# Create a df of sample names from the counts table, then add PAC prefix and pad to 7 characters
+countsPlacentaNames <- data.frame(names(countsPlacenta)) %>%
+  mutate(names.countsPlacenta. = paste0("PAC",stringr::str_pad(names.countsPlacenta., width = 4, pad = "0")))
+
+# convert back to a vector and overwrite the colnames in the counts table
+countsPlacentaNames <- countsPlacentaNames[,]
+
+# replace the old sample names with the new names (PACXXXX)
+names(countsPlacenta) <- countsPlacentaNames
+
+# ensure the columns are ordered by assending sample name
+countsPlacenta <- countsPlacenta[,order(colnames(countsPlacenta),decreasing=FALSE)]
+
+
+# remove multimapped miRNA with identical mature sequences
+identicalMature <- c("hsa-miR-199b-3p", "hsa-miR-365b-3p", "hsa-miR-517b-3p", "hsa-miR-518d-5p", "hsa-miR-520c-5p", "hsa-miR-526a", "hsa-miR-518e-5p", "hsa-miR-519b-5p", "hsa-miR-522-5p", "hsa-miR-523-5p", "hsa-miR-519c-5p")
+
+countsPlacenta <- countsPlacenta %>% 
+  subset(., rownames(.) %notin% identicalMature)
+
+```
+
+**What does `processGroup` signify in this script?**  
+ 
+- `processGroup` = representing the sequencing batch and used for correcting for technical variance  
+
+**Recode Melanie's mDat variable names to match our variable names as much as possible - keep all orginal columns**  
+
+Trimester 1 < 13 weeks  
+Trimester 2 13 < x < 24 weeks  
+Trimester 3 >= 24 weeks    
+
+
+```{r adjusting_external }
+
+#import the sample metadata
+all_samples <- read.delim(here::here("data/external", "sampleMeta.txt"),sep ="\t", header= TRUE)
+
+# drop sample metata for PAC0131 and PAC0071 - failed QC
+smith_mDat <- dplyr::filter(all_samples, samplename != c("PAC0131", "PAC0071")) %>% 
+  mutate (Trimester = case_when (
+    gestationalAge <= 13 ~ "Trimester 1",
+    between(gestationalAge, 13, 24) ~ "Trimester 2",
+    gestationalAge >= 24 ~ "Trimester 24"
+  )) %>% 
+  mutate (Sex = case_when (
+    fetalSex == "XY" ~ "Male",
+    fetalSex == "XX" ~ "Female"
+  ))
+
+
+```
+
+**Show the distribution of samples by:** 
+
+- trimester + sex  
+- trimester + sex + oxygenation  
+
+*Hint*: Add geom_bar(stat = "count", position = position_dodge2(preserve = "single"))   
+
+```{r, distribution_external, fig.width=15, fig.height=4}
+
+tri_sex <- smith_mDat %>% 
+  ggplot(aes(x = Trimester, fill = Sex)) +
+  geom_bar(stat = "count", width = 0.6,position = position_dodge2(preserve = "single")) +
+  theme_minimal(base_size = 20) +
+  labs(title = "Distribution of Samples by Trimester for each Sex ", x = "Trimester", y = "Number of Samples")
+
+tri_sex_oxy <- smith_mDat %>% 
+  ggplot(aes(x = Trimester, fill = Sex)) +
+  geom_bar(stat = "count", width = 0.6,position = position_dodge2(preserve = "single")) +
+  theme_minimal(base_size = 20) +
+  facet_wrap("oxygenation")+
+  labs(title = "Distribution of Samples by Trimester, Sex, and Oxygenation", x = "Trimester", y = "Number of Samples")
+  
+
+ggarrange(tri_sex,tri_sex_oxy, nrow=1, ncol= 2)
+```
+
+**Filter and Normalize this data as we did for our data**  
+
+```{r, filtering_2_external}
+#removing microRNA with 0 counts 
+
+#Copy pasted from script #2
+
+external_Fil_0 <- countsPlacenta %>% 
+  filter_all(any_vars(. > 0)) 
+
+external_Fil_0 %>% 
+  mutate(Sums = rowSums(.)) %>% 
+  filter (Sums == 0) 
+  
+
+ #keep miRNAs with an expression count of 1 or more in 2 or more samples 
+
+external_Fil_1_2 <- external_Fil_0 >=1
+
+external_Fil_1_2 <- external_Fil_1_2 %>% 
+  as.data.frame() %>% #the above function converts the df into a matrix, and there are a few functions we cannot apply to matrices
+  mutate(Sum = rowSums(.))
+
+external_Fil_1_2 <- external_Fil_1_2 %>% 
+  filter(Sum >= 2)
+
+external_Fil_0 <- external_Fil_0 %>% 
+  rownames_to_column("mirs")
+  
+external_Fil <- external_Fil_1_2 %>% 
+  rownames_to_column("mirs") %>% 
+  dplyr::select(mirs) %>% 
+  left_join(external_Fil_0, by = "mirs") 
+# 
+# all(countsPlacenta$mirna == rownames(external_Fil_1_2))
+
+#remove duplicates
+
+external_Fil_last <- external_Fil %>% 
+
+  mutate(Sum = rowSums(select_if(., is.numeric))) %>% 
+  # here I'm specifying to select only the numeric columns, because our first column are the miRNA names
+  
+  group_by(mirs) %>% 
+  # grouping by the mature miRNA names
+  
+  slice_max(Sum) %>% 
+  # within the miRNA groups, only keeping the ones which have the highest value in Sum
+  
+  dplyr::select(-Sum) %>%
+  # removing the Sum and miRNA precursor column (as we have other dfs we can match to find out the precursor if needed)
+  
+  distinct(mirs, .keep_all = TRUE)  %>% 
+  
+  column_to_rownames(var="mirs")
+
+```
+
+
+Not sure how to connect the external_Fil_last and the normalized version of the data
+
+
+```{r normalization_external}
+#Copy pasted from script #2 
+
+#Normalization
+
+
+filteres_mir_names <- as.data.frame(row.names(external_Fil_last))
+samples <- smith_mDat$samplename
+
+# computing normalized counts (between sample normalization of miRNA expression)
+norm_counts <- DGEList(counts = external_Fil_last, samples = samples, genes = filteres_mir_names)
+norm_counts <- calcNormFactors(norm_counts, method = "RLE")
+
+# performing within sample normalization of miRNA expression (CPM = Counts per Million = RPM = Reads per Million)
+smith_eNorm <- cpm(norm_counts)
+
+# converting to our usual log10 expression
+smith_eNorm <- log2(smith_eNorm + 1) #When I use log2 the distribution does not look that well
+
+# converting the expression counts into whole numbers
+smith_eNorm <- round(smith_eNorm, digits = 0)
+
+smith_eNorm <- as.data.frame(smith_eNorm)
+
+
+
+```
+
+**Plot the density and boxplot distribution of `smith_eNorm`**  
+
+```{r, denstiy_boxplot_external, fig.width=15, fig.height=4}
+
+smith_eNorm_plot <- smith_eNorm %>% 
+  rownames_to_column(var="miRNA") %>% 
+  pivot_longer(cols = -c("miRNA"),names_to = "samplename", values_to = "Reads") %>% 
+  left_join(smith_mDat, by = "samplename")
+
+
+density_smith <- smith_eNorm_plot %>% 
+  ggplot(aes(x=log10(Reads+1), colour = Trimester)) +
+  geom_density() +
+    theme(legend.position = "none")+
+  labs(title = "Normalized Gene Expression")
+
+bxp_smith <- smith_eNorm_plot %>% 
+  ggplot(aes(x = samplename, y = Reads, fill = samplename)) +
+  geom_boxplot() +
+  theme(legend.position = "none") +
+  labs(title = "Normalized Gene Expression")
+
+
+ggarrange(density_smith,bxp_smith, nrow = 1, ncol = 2 )
+```
+
+**Save smith_mDat and smith_eNorm as R objects**  
+
+```{r, save, eval=FALSE}
+
+saveRDS(smith_eNorm, here::here ("data", "smith_eNorm.RDS"))
+saveRDS(smith_mDat, here::here ("data", "smith_mDat.RDS"))
+
+```
+
+***  
+
+
+
+
+
+
+
