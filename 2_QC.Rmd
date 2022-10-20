@@ -1,0 +1,941 @@
+---
+title: "SSRP: Quality Control"
+author: "Fidan Sadig"
+output: 
+  html_document:
+    keep_md: yes
+    highlight: haddock #tango, pygments, kate, monochrome, espresso, zenburn, haddock, textmate
+    toc: true 
+    toc_depth: 4
+    toc_float: 
+      collapsed: true 
+      smooth_scroll: false  
+    theme: sandstone  #cosmo, paper, lumen, sandstone, simplex, yeti, cerulean, journal, flatly, darkly, readable, spacelab, united
+editor_options: 
+  chunk_output_type: console
+---
+
+
+***  
+
+### **Script #1 Extras**   
+
+Use this space to add additionally notes or plots for yourself from what we discussed after going through script #1  
+
+```{r boxplot}
+
+# data loading packages
+library(readxl) 
+library(openxlsx)
+library(here)
+
+# data wrangling packages
+library(tidyverse)
+library(reshape2)
+library(magrittr)
+
+
+#I had to put these lines here too to run the plots 
+
+eDat <- readRDS(here::here("data", "eDat.RDS"))  
+pDat <- readRDS(here::here("data", "pDat.RDS"))
+
+
+eDat_nonames <- eDat %>% 
+  rownames_to_column(var="Precursor:miRNA") %>% 
+  separate("Precursor:miRNA", c("precursor", "miRNA"), ":")
+
+
+eDat_plot <- eDat_nonames %>% 
+  pivot_longer(cols = -c(precursor, miRNA), names_to = "Case_ID", values_to = "Reads")
+
+
+eDat_plot <- eDat_plot %>% 
+  inner_join( pDat, c ("Case_ID"))
+
+
+eDat_plot %>% 
+  mutate(Reads=log2(Reads)) %>% 
+  filter (miRNA == c("hsa-miR-21-5p","hsa-miR-200a-5p","hsa-miR-373-5p")) %>% 
+  ggplot(aes(x = miRNA, y = Reads, fill = Trimester)) +
+  geom_boxplot() +
+  theme_minimal(base_size = 12) +
+  labs(title = "Distribution of Aligned miRNAs per Sample", x = "Case ID", y = "Number of aligned miRNA")
+```
+
+
+
+
+Code chunk parameters:  
+- eval: whether you want to evaluate the output of that chunk (sometimes you'll write a few different code versions performing the same
+functions. In order to keep them separate, I put them into different chunks and set the ones I don't want to use to eval = FALSE)  
+- echo: whether you want to output the code in that chunk (I set my package loading chunk to echo = FALSE)  
+- warning: display any warnings associated with the code ran in that chunk  
+- message: display any messages associated with the code ran in that chunk  
+- error: display any errors associated with the code ran in that chunk  
+- results: options to display the code output  
+
+Check the following on how to set custom themes for your plots:  
+
+
+```{r themes, message = FALSE, error = FALSE, warning = FALSE, results = 'hide'}
+#removed eval = False to run the my_theme
+
+# load any font from Google Fonts that you'd like - my personal favourite is Montserrat. Check out all the fonts here: https://fonts.google.com
+
+# install.packages("sysfonts")
+# install.packages("showtext")
+# install.packages("extrafont")
+
+library(sysfonts)
+library(showtext)
+library(extrafont)
+
+font_add_google("Montserrat", "Mont") # I'm saying to add the Montserrat font, and name it as Mont
+
+showtext_auto() # required to render custom fonts
+knitr::opts_chunk$set(fig.showtext = TRUE, fig_retina = 1)
+
+# my custom ggplot theme
+my_theme <- theme_minimal() +
+  theme(plot.title = element_blank(),
+        plot.subtitle = element_text(family = "Mont", size = 12),
+        legend.text = element_text(family = "Mont", size = 12),
+        axis.title = element_text(family = "Mont", size = 26),
+        axis.text.y = element_text(size=16),
+         axis.text.x = element_text(size=16),
+        legend.position = "bottom")
+
+# my custom colour palette for my variables - I like to use this website: https://www.schemecolor.com/ 
+# here, we're making another data type called a list - a list can stire multiple dataframes. We're making a separate df for each our pur variables and assigning it a corresponding hex code (colour code) which will then be output when we specify the manual colour/fill option in ggplot
+
+colpal <- list(Trimester = c(`1` = "#ecb3da", `2` = "#c36cac", `3` = "#981580"),
+               Sex = c(`MALE` = "#E05D5D", `FEMALE` = "#ffb708"),
+               flowCell = c(`C5JC1ACXX` = "#58508d", `C5JC4ACXX` = "#954693", `C6RGTANXX` = "#cf2d7b"))
+
+# add however many more variables that you'd like!
+
+# when you want to specify these pariculat colours, within your ggplot add: 
+ 
+scale_colour_manual(values = colpal$whichever_variable_you_want_to_colour) 
+# OR 
+scale_fill_manual(values = colpal$whichever_variable_you_want_to_fill)
+
+```
+
+
+### **0.0 Introduction**   
+
+Here, we're going to perform quality control steps on our data.  
+
+What is QC and why is it important?  
+
+Before we start analysing our data and getting meaningful interpretations of our result, we have to ensure that the data that we're actually using is representative of our sample expression. We don't want samples or sequences (here, miRNAs) to represent a biased representation. For example, the majority of sequences/species will record 0 counts (transcripts), and keeping these sequences in our data would lead us to believe that the average expression of our whole dataset is close to zero (when that is not the case). And hence, the basic steps of QC include:  
+
+- Filtering: removing sequences/samples of low quality  
+- Normalization: Re-adjusting and standardising expression of filtered sequences for each gene between samples, and further all genes within the same sample  
+- Hierarchical Clustering: Identifying the variation between samples (how similar or disimilar are they from each other)  
+- Dimensionality Reduction: Identifying the variables within our data that contribute to the variation observed in our data   
+
+[This workflow](https://bioconductor.org/packages/release/workflows/vignettes/RNAseq123/inst/doc/limmaWorkflow.html) provides good explanations of the steps that we're going to be using.  
+
+
+***  
+
+### **1.0 Loading Packages and Data** 
+
+```{r loading packages, message=FALSE, error=FALSE, warning=FALSE}
+
+# rmarkdown packages
+library(knitr) 
+library(rmarkdown)
+library(devtools)
+
+
+
+# plotting/table packages 
+library(arsenal)
+library(janitor)
+library(kableExtra) 
+library(egg)
+library(RColorBrewer)
+library(ggpubr)
+
+# advanced genomic packages
+remotes::install_github("wvictor14/plomics")
+library(plomics)
+#install.packages("BiocManager")
+library(BiocManager)
+
+library(edgeR)
+library(pheatmap)
+
+# BiocManager::install(c("limma", "edgeR", "DESeq2", "biomaRt", "miRBaseConverter", "multiMiR", "preprocessCore"))
+
+
+```  
+
+***
+
+### **2.0 Data**  
+
+Load in your `eDat` and `pDat` RDS (R objects) saved from the `Data_Exploration` script 
+
+```{r loading-data}
+
+
+eDat <- readRDS(here::here("data", "eDat.RDS"))
+pDat <- readRDS(here::here("data", "pDat.RDS"))
+```
+
+
+
+Okay, first we're going to visualise the spread of our data. For this, we'll use something called as a density plot, as well as boxplots.  
+
+Go back to the `Data_Exploration` script, and find the `pivot_longer` function. We'll be using that to convert eDat into a longer df to be able to plot.  
+
+**Convert eDat into a longer df, with `names_to` to Case_ID and `values_to` to Reads, and join pDat by Case_ID**  
+
+Convert the rownames to a column first
+
+```{r eDat_plot}
+
+eDat_plot <- eDat %>% 
+  rownames_to_column(var = "miRNA") %>% 
+  pivot_longer(cols = -c("miRNA"),names_to = "Case_ID", values_to = "Reads") %>% 
+  inner_join(., pDat, by = "Case_ID")
+```
+
+```{r raw-spread}
+
+
+eDat_plot %>% 
+  ggplot(aes(x = Reads, colour = Case_ID)) +
+  geom_density() +
+  theme_minimal()
+
+```
+
+Hmm, so that doesn't show us much - and the reason being that the spread of our data is too wide, and hence we're not able to visualise it well. As most of the expression it at the extremes, with the majority of sequences showing wither 0 or very high expression, we're not able to see the spread.  
+
+To overcome this, we're going to convert our expression values to a log10 scale (expression data is almost always visualised by converting to a log scale (usually log2 or log10) to be able to visualise the relative differences)
+
+```{r raw-spread-log}
+
+eDat_plot %>% 
+  ggplot(aes(x = log10(Reads), colour = Case_ID)) +
+  geom_density() +
+  theme_minimal()+
+  theme(legend.position = "none") #to remove the legends of our plot
+
+```
+
+
+However, we get a warning saying `Warning: Removed 41558 rows containing non-finite values (stat_density).` Can you guess why?  
+
+Go ahead and convert 0 to its log10 expression
+
+```{r log-0}
+
+log10(0)
+
+```
+
+And here we see that the [log2 value of 0 is infinity](https://www.google.com/search?q=log2+value+of+0&rlz=1C1CHBD_enCA1009CA1009&oq=log2+value+of+0&aqs=chrome..69i57j0i512j0i22i30j0i390l4.382j0j7&sourceid=chrome&ie=UTF-8), and we cannot plot an infinite value.  
+
+And so, to be able to plot 0 values, we do a `log2(x+1)` transformation, the most common way to be able to visualise these sequences. This transformation has a pseudo count/value of 1 to all values, essentially shifting our entire expression matrix by +1. 
+
+```{r raw-spread-log2-1, fig.width=15, fig.height=4}
+
+eDat_plot %>% 
+  ggplot(aes(x = log10(Reads + 1), colour = Case_ID)) +
+  geom_density() +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+And this shows us the spread of our raw data. What do you think is the interpretation of this plot?  
+
+It seems like it is left skewed. It shows that majority of reads are in the 0-1 fold range. 
+
+**Facet the above density plot by trimester**  
+
+```{r density-trimester, fig.width=15, fig.height=4}
+
+eDat_plot %>% 
+  ggplot(aes(x = log10(Reads + 1), colour = Case_ID)) +
+  geom_density() +
+  theme_minimal() +
+  facet_wrap("Trimester")+
+  theme(legend.position = "none")
+
+  
+  
+
+```
+
+
+Let's now see the expression spread per sample using boxplots:
+
+```{r raw-boxplots, fig.width=15, fig.height=4}
+
+eDat_plot %>% 
+  ggplot(aes(x = Case_ID, y = log10(Reads + 1), fill = Case_ID)) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(legend.position = "none") 
+
+```
+
+
+We're now going to assign the plots to a variable, and display them together:  
+
+**Assign both plots to variables called d1 (density) and b1 (boxplot 1) and output them together**  
+
+Add `+ labs(title = "Gene Expression", subtitle = "Raw Counts")` to both plots, and `+ theme(axis.text.x = element_text(angle = 35, hjust = 1))` to the boxplot  
+
+```{r raw-plots,  fig.width=15, fig.height=4}
+
+
+d1 <- eDat_plot %>% 
+  ggplot(aes(x = log10(Reads + 1), colour = Case_ID)) +
+  geom_density() +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(title = "Gene Expression", subtitle = "Raw Counts")
+
+b1 <-  eDat_plot %>% 
+  ggplot(aes(x = Case_ID, y = log10(Reads + 1), fill = Case_ID)) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(legend.position = "none")  +
+  labs(title = "Gene Expression", subtitle = "Raw Counts") +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+
+ggarrange(d1, b1)
+
+```
+
+***
+
+### **3.0 Filtering**  
+
+Usually, filtering is performed by keeping a certain number of reads per miRNA in a certain number of samples. So, for example:  
+
+- By Counts: Expression Count of 1 or more in all samples  
+- By Counts and % of Samples: Expression Count of 1 or more in 10% of samples  
+- By Counts and No. of Samples: Expression Count of 2 or more in 2 samples  
+
+#### **3.1 Removing miRNAs with 0 counts**  
+
+
+
+```{r fil_0}
+
+eFil_0 <- eDat %>% 
+  filter_all(any_vars(. > 0))
+
+
+```
+
+**To check if we have any miRNAs with 0 in all samples mistakenly left, use the `RowSums` function to make a new column and `filter` to select entries which have an entry of 0 within the sum column**  
+
+```{r sum_0}
+
+eFil_0 %>% 
+  mutate(Sums = rowSums(.)) %>% 
+  filter (Sums == 0) 
+  
+ eFil_0 %>% 
+  mutate(Sums = rowSums(.)) %>% 
+  glimpse() 
+
+```
+
+**CHECKPOINT:** You `eFil_0` df should have 2548 rows and 31 columns  
+
+Awesome!
+
+However, that does leave us with some miRNAs that have expression > 0 in some samples, but with expression = 0 in the rest of the samples  
+
+**Separate column 1 in eDat_plot, and pull out hsa-miR-10226 and make a bar chart of it's expression by Sample**  
+
+```{r plot_0}
+
+eDat_plot %>% 
+  separate("miRNA", c("precursor", "miRNA"), ":") %>% 
+  filter (miRNA == "hsa-miR-10226") %>% 
+  ggplot(aes(x = Case_ID , y = Reads )) +
+  geom_bar(stat = "identity", width = 0.6) +
+  theme_minimal() +
+  labs(title = "Expression of hsa-miR-10226 by sample", x = "Sample", y = "Reads")
+
+  
+```
+
+Do you think we should filter out miRNAs with 0 expression in all samples, or only miRNAs with 0 expression in some samples? Give a pro and con that you can think for both filtering criteria:  
+
+Filter out miRNAs with 0 expression in all samples:  
+Pro: higher average per sample and a better representation of the landscape. 
+Con: loose information about microRNA that do not contribute at all which can be useful for future researches.
+
+Filter out miRNAs with 0 expression in some samples:  
+Pro: decreasing noise and focusing on the significant samples. 
+Con:loosing potential candidates to include in the final result. microRNAs maybe have the zero in some samples because wrong extractions or some other false signals???
+
+#### **3.2 Filtering by % of Samples**     
+
+Usually filtering of % of samples occurs when you have distict groups, i.e., cases and controls, for examples. You should select to keep miRNAs with a count of x in x% of samples in each of the groups, and then retain the miRNAs that pass that filtering criteria. Some of the miRNAs that pass would be common between the two groups, and some would be present in only either of the two groups  
+Here, filtering by % of samples doesn't make the most sense, as even if we say 10% of samples, that 10 samples (since we have a total of 30 samples) and those 10 samples 
+
+
+#### **3.3 Filtering by Number of Samples**      
+
+Let's check the number of samples we have per group by 2 of the variables that we can hypothesize will be contributing towards differences in expression - trimester and sex  
+
+```{r sample-table}
+
+pDat %>% 
+  tabyl(Trimester, Sex)
+
+```
+
+Okay, so the group with the lowest number of samples is Trimester 1 Males - 2 samples. If we were to think about the genes that might be differentially expressed, we can assume that there might be a few that show differential expression in these two samples as compared to the rest. Now, 2 does seem to be too low of a number to filter by, but given that we have only 30 samples, it's fine.
+
+So, we're going to filter to only keep miRNAs with an expression count of 1 or more in 2 or more samples 
+
+For that, we'll first convert our `eFil_0` into a logical df, giving us a TRUE value is expression is equal to or greater than 1 count, FALSE is expression is 0, and then sum the number of TRUEs we have, and if the sum is more than 2, then those are the miRNAs we keep
+
+```{r efil_1_2}
+
+eFil_1_2 <- eFil_0 >=1
+
+eFil_1_2 <- eFil_1_2 %>% 
+  as.data.frame() %>% #the above function converts the df into a matrix, and there are a few functions we cannot apply to matrices
+  mutate(Sum = rowSums(.))
+
+eFil_1_2 <- eFil_1_2 %>% 
+  filter(Sum >= 2)
+
+eFil_0 <- eFil_0 %>% 
+  rownames_to_column("mirs")
+  
+eFil <- eFil_1_2 %>% 
+  rownames_to_column("mirs") %>% 
+  dplyr::select(mirs) %>% 
+  left_join(eFil_0, by = "mirs") 
+
+all(eFil$mirna == rownames(eFil_1_2))
+
+glimpse(eFil)
+
+```
+
+**CHECKPOINT:** Your filtered df, `eFil` should have 2344 rows and 31 columns  
+
+#### **3.4 Remove duplicate mature miRNAs**     
+
+Each mature miRNA (the ones having -3p and -5p at the end of their names) comes from precursor miRNAs - one precursor (e.g., miR-200) gives rise to two mature miRNAs (miR-200-3p and miR-200-5p). Now, there are a few precursors which give rise to the same two mature miRNAs (usually because it's only a few nucleotide difference somwehere in the hairpin loop of the precursor miRNA sequence).  
+
+Let's first check which mature miRNAs are duplicated:  
+
+**Separate the mirs column, count the number of mature miRNAs, and use filter to keep ones with a count of more than 1**
+
+```{r dup-mirs, results='hide'}
+
+eFil %>% 
+    separate("mirs", c("precursor", "miRNA"), ":")  %>% 
+    add_count (miRNA)  %>% 
+    filter (n>1) 
+
+
+```
+
+
+So, we can see that there are 149 mature miRNAs that have been duplicated - We're going to keep the ones which have the highest overall expression  
+
+
+```{r efil}
+
+eFil_last <- eFil %>% 
+  separate("mirs", c("precursor", "miRNA"), sep = ":") %>% 
+
+  mutate(Sum = rowSums(select_if(., is.numeric))) %>% 
+  # here I'm specifying to select only the numeric columns, because our first column are the miRNA names
+  
+  group_by(miRNA) %>% 
+  # grouping by the mature miRNA names
+  
+  slice_max(Sum) %>% 
+  # within the miRNA groups, only keeping the ones which have the highest value in Sum
+  
+  dplyr::select(-Sum, -precursor) %>%
+  # removing the Sum and miRNA precursor column (as we have other dfs we can match to find out the precursor if needed)
+  
+  distinct(miRNA, .keep_all = TRUE)  %>% 
+  glimpse()
+  # remove rows with duplicates within the miRNA column, but keep all the rest of the columns
+  
+  # column_to_rownames("miRNA")  # this decreased the number of the columns so I commented it out and I needed to keep them as columns for the next step too
+
+```
+
+**CHECKPOINT:** Your filtered df with mature miRNAs `eFil` should have 2137 rows and 31 columns 
+
+**Make the density and boxplots for our filtered data, as we did for the raw data above**  
+
+```{r fil-plots, fig.width=15, fig.height=6}
+
+eFil_plot <-  eFil_last %>% 
+  pivot_longer(cols = -c("miRNA"),names_to = "Case_ID", values_to = "Reads") %>%  #I am not sure if I was supposed to do this step
+  inner_join(., pDat, by = "Case_ID")
+
+d2 <- eFil_plot %>% 
+  ggplot(aes(x = log10(Reads + 1), colour = Case_ID)) +
+  geom_density() +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+b2 <- eFil_plot %>% 
+  ggplot(aes(x = Case_ID, y = log10(Reads + 1), fill = Case_ID)) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(legend.position = "none")  +
+  labs(title = "Gene Expression", subtitle = "Raw Counts") +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1))
+
+ggarrange(d1, b1, d2, b2, nrow = 2, ncol = 2)
+
+```
+
+***
+
+### **4.0 Normalization**  
+
+Now that we've filtered our data, it's not in the 'shape' it was before - you can also see for the plots above that the maximum density is also low (which makes sense, and is good confirmation since we removed miRNAs with 0 exp in all samples).  
+
+To take into account that the relative expression (exp between one miRNA to another) between the miRNAs within our eFil dataset is different from that of the relative expression between miRNas in our original, raw `eDat` df, we use a techniques known as normalization  
+
+Normalization takes into account the full expression dataset we have, and adjusts the expression of each miRNA, realtive to the whole dataset. It outputs a numerical value for each miRNA which is either subtracted to and or added to the original expression  
+
+We're going to use the [Relative Log Expression](https://journals.plos.org/plosone/article?id=10.1371/journal.pone.0206312#:~:text=Relative%20Log%20Expression%20(RLE)%3A,geometric%20mean%20across%20all%20samples.) method of normalization
+
+```{r norm}
+
+eFil <- eFil %>% 
+column_to_rownames(var="mirs")
+
+filteres_mir_names <- as.data.frame(row.names(eFil))
+samples <- pDat$Case_ID
+
+# computing normalized counts (between sample normalization of miRNA expression)
+norm_counts <- DGEList(counts = eFil, samples = samples, genes = filteres_mir_names)
+norm_counts <- calcNormFactors(norm_counts, method = "RLE")
+
+# performing within sample normalization of miRNA expression (CPM = Counts per Million = RPM = Reads per Million)
+eNorm <- cpm(norm_counts)
+
+# converting to our usual log10 expression
+eNorm <- log10(eNorm + 1) 
+
+# converting the expression counts into whole numbers
+eNorm <- round(eNorm, digits = 0)
+
+eNorm <- as.data.frame(eNorm)
+
+```
+
+**Make the density and boxplots for our normalized data, as we did for the raw data above**  
+
+```{r norm-plots, fig.width=20, fig.height=14, warning=FALSE}
+
+eNorm_plot <- eNorm %>% 
+  rownames_to_column(var="miRNA") %>% 
+  pivot_longer(cols = -c("miRNA"),names_to = "Case_ID", values_to = "Reads")
+  
+
+d3 <- eNorm_plot %>% 
+  ggplot(aes(x=Reads, colour = Case_ID)) +
+  geom_density() +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+b3 <- eNorm_plot %>% 
+  ggplot(aes(x = Case_ID, y = Reads, fill = Case_ID)) +
+  geom_boxplot() +
+  theme_minimal() +
+  theme(legend.position = "none")  +
+  labs(title = "Normalized Gene Expression")
+
+ggarrange(d1, b1, d2, b2, d3, b3, nrow = 3, ncol = 2)
+
+```
+
+As we can see now, the expression within our normalized df `eNorm` is much well distributed than our raw expression  
+
+***
+
+### **5.0 Sample-sample correlation**  
+
+As an additional measure, we'll check how well our samples relate to each other - i.e. are samples within the same trimester showing higher degrees of association (which is what we would expect)
+
+```{r cor-maps, fig.width=7, fig.height=6}
+
+raw_cor <- cor(eDat)
+
+
+
+# for the following function, we require the column names of our expression dataframe to be the rownames of our pDat dataframe. Otherwise the function doesn't work
+pDat <- pDat %>% 
+  column_to_rownames("Case_ID")
+
+
+raw_cor %>% 
+  pheatmap::pheatmap(clustering_distance_cols = "euclidean", clustering_method = "complete", 
+                     #the method by which we're caluclating the `distance` i.e. the similarity between the samples. The `complete` method of clutering deals better with outlier samples than outer methods
+                     
+                     cluster_rows = TRUE, 
+                     #clustering by rows
+                     
+                     show_colnames = TRUE, show_rownames = TRUE,
+                     #show sample names for both rows and columns
+                     
+                     annotation_col = pDat[c("Trimester")], annotation_row = pDat[c("Trimester")],
+                     #select the variables by which we want to observe our clustering
+                     
+                     #name of the plot
+                     main = "Raw Sample Correaltion") 
+
+norm_cor <- cor(eNorm)
+
+norm_cor %>% 
+  pheatmap::pheatmap(clustering_distance_cols = "euclidean", clustering_method = "complete", 
+                     cluster_rows = TRUE, show_colnames = TRUE, show_rownames = TRUE,
+                     annotation_col = pDat[c("Trimester")], annotation_row = pDat[c("Trimester")],
+                     main = "Raw Sample Correaltion")
+
+```
+
+This shows us that by normalizing, samples within the same trimester cluster together and have high correlation between each other  
+
+***  
+
+### **5.0 Dimensionality Reduction**  
+
+Dimensionality reduction techniques allow us to observe 'big data' in a meaningful way, where all of the expression data per sample and within sample is converted into units showing the 'distance' i.e., similarity between them. Here's we'll be using Principal Component Analysis, which reduces and converts our data points into distinct Principal Components (which have no units of measure) and shows us how much variability exists between our data, and which variables are contributing towards that variation  
+
+```{r pca}
+
+# first convert eNorm to log10+1
+eLog <- log10(eNorm + 1)
+
+# the function we use performs it's operation row-wise, and since we want to check the variability between genes and not the samples, we'll transpose our exp df to convert the samples to be rows, and the columns to be our genes. Don't open this df as it might cause R to crash (as there will be more columns than rows in this df now)
+t_eLog <- as.data.frame(t(eLog))
+
+# the function to compute PCA. We set scale to FALSE, because we already log10 scaled our data, and center to TRUE, so that the values are converted to Z-scores
+pca <- prcomp(t_eLog, scale = FALSE, center = TRUE) #n has to be less than number of samples
+
+# each score represents the contribution of each gene within each sample
+scores <- pca$x
+
+summary(pca)
+
+```
+
+Here, the summary output shows us the how much variability each PC is contributing in the Proportion of Variance row, and the total sum variability each of each preceding PC in the Cumulative Proportion row. The Cumulative Proportion will always add up to a 100% at the last PC.  
+
+> We're now going to make the 3rd type of file you'll usually find along with `eDat` and `pDat` - the metadata, or `mDat` file.  
+
+This file contains additional information about our samples, that isn't clinical/phenotypical in nature  
+
+```{r mdat}
+
+scores <- scores %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Case_ID")
+
+pDat <- pDat %>% 
+  rownames_to_column("Case_ID")
+
+mDat <- pDat %>% 
+  left_join(scores, by = "Case_ID")
+
+
+
+# getting the data from the summary function we saw above  
+summary <- data.frame(PC = 1:30, 
+                      var_explained = (pca$sdev)^2 / sum((pca$sdev)^2), 
+                      cumulative = cumsum(pca$sdev^2 / sum(pca$sdev^2))
+                      )
+
+summary <- summary %>% 
+  mutate(cumulative_perc = cumulative*100)
+
+# we're now going to convert our PC column into a different data structure - a factor. Factors allow you to order variables within a column according to your liking; each variable is now called a level
+
+# the sort argument is telling to order the column by ascending numerical order
+summary <- summary %>% 
+  mutate(PC = sort(as.factor(PC)))
+
+summary$PC
+
+```
+
+**Convert `Trimester` in pDat to a factor**  
+*Hint: Use the `fct_relevel` function*
+
+```{r tri-fact}
+
+pDat <- pDat %>% 
+  mutate (Trimester = fct_relevel(Trimester))
+
+
+  
+```
+
+**Make plots with PCs on the x-axis and** 
+
+- var_explained on the y-axis  
+- cumulative_perc on the y-axis
+
+```{r pc-plots, fig.width=15, fig.height=4}
+
+var_gr <- summary %>% 
+  ggplot(aes(x = PC, y = var_explained)) +
+  geom_bar(stat="identity") +
+  theme_minimal() +
+  theme(legend.position = "none")  +
+  labs(title = "Normalized Gene Expression")
+
+cum_gr <- summary %>% 
+  ggplot(aes(x = PC, y = cumulative_perc)) +
+  geom_bar(stat="identity") +
+  theme_minimal() +
+  theme(legend.position = "none")  +
+  labs(title = "Normalized Gene Expression")
+  
+
+ggarrange(var_gr,cum_gr, nrow = 1, ncol = 2)
+
+```
+
+We see from the summary and the plots, that PC1 is contributing about 15% of the variance, PC2 13%, and so on, to add up to 100% at PC30 (30 PCs because we have 30 samples)  
+
+We'll now check which of our variables actually contribute towards the PCs and drive variance within each PC.  
+
+But first, we'll select the variables of interest: Trimester, Sex, Processing_time, RQS, flowCell   
+
+Why flowCell? My previous analyses have shown that [flowcell](https://www.youtube.com/watch?v=pfZp5Vgsbw0)(which is a kind of chip on which sequencing is carried out. Each flowcell has up to 8 lanes, and a sample is run per lane) contributes towards the variation we see, and we get different differentially-expressed genes depending upon if we include it or not. To quickly check of it indeed does, I'll use as an example  
+
+```{r flowcell}
+
+
+eDat_plot %>% 
+  separate("miRNA", c("precursor", "miRNA"), ":") %>%   #not sure why at this point the column wasn't seperated into two so had to add 
+  filter(miRNA == "hsa-miR-21-5p") %>% 
+  ggplot(aes(x = miRNA, y = log2(Reads), fill = Trimester)) +
+  geom_boxplot() +
+  facet_grid(~flowCell) +
+  theme_minimal() 
+
+```
+
+Here, we can see that on two of the flowcells, only trimester 2 samples were run, whereas on the last flow cell, we have a mix of all trimesters. As you can imagine, not having the samples equally distributed amongst all 3 flow cells means that cells 1 and 2 are biased towards expression for trimester 2 samples.  
+
+```{r pca-pval}
+
+# Selecting the variables of interest
+pDat_cor <- pDat %>% 
+  dplyr::select(Trimester, Sex, Processing_time, RQS, flowCell)
+
+scores <- scores %>% 
+  column_to_rownames("Case_ID")
+
+# calculating the pvalue significance of the above variables by PC
+pc_pval <- plomics::lmmatrix(dep = scores, ind = pDat_cor, metric = "Pvalue") #correaltion matrix
+
+# transposing
+pc_pval <- t(pc_pval) #only for visual purposes - Not being used for any calculations
+
+# highlighting the variables significantly contribuing towards each PC
+pc_pval %>% 
+  as.data.frame() %>% 
+  mutate(across(everything(), round, 3)) %>% 
+  mutate(across(everything(), ~cell_spec(.x, color = ifelse(.x <= 0.05, "green", "")))) %>% 
+  kable(escape = F) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", full_width = F, fixed_thead = T))
+
+```
+
+
+We're now going to represent the data in the above table in a plot:  
+
+
+```{r pval-plot}
+
+pc_plot <- pc_pval %>% 
+  as.data.frame %>% 
+  mutate(Principal_Component = rownames(pc_pval),
+         PC = as.factor(1:30)) %>% 
+  pivot_longer(cols = -c(Principal_Component, PC), names_to = "Variable", values_to = "pval") %>%
+  mutate(pval_cat = factor(case_when(
+    pval > 0.05  ~ "> 0.05",
+    pval < 0.05 & pval > 0.01 ~ "< 0.05",
+    pval < 0.01 & pval > 0.001 ~ "< 0.01",
+    pval < 0.001 ~ "< 0.001"), 
+    levels = c("> 0.05", "< 0.05", "< 0.01", "< 0.001")))
+
+#making a colour palette for the above plot
+pc_colpal <- c("white", "#c7dfba", "#8ebe78", "#509e36")
+# setting the levels of the pval_cat factor column to the colours in pc_colpal
+names(pc_colpal) <- levels(pc_plot$pval_cat)
+
+
+pc_plot %>% 
+  ggplot(aes(x = PC, y = Variable , fill = pval_cat)) +
+  geom_tile(col = "lightgray") +
+  # theme_bw() +
+  my_theme+
+  scale_x_discrete(expand = c(0,0)) + #expand function fits the plot to its assigned dimesions 
+  scale_y_discrete(expand = c(0, 0)) +
+  scale_fill_manual(values = pc_colpal)  + 
+  coord_fixed() + # very important otherwise height of each tile is elongated!
+  labs(title = "Contribution of Variables to Observed Expression\n", x = "", y = "", fill = "P value") 
+ 
+
+```
+
+We'll do the same to calculate the R-saured value for each of the variables within each PC.  
+
+**Can you explain what an R-squared value is?**  
+It is a value that showed the degree of correlation.it ranges between 0 and 1. closer to 1, stronger is the correlation. 
+
+```{r rsq-plot}
+
+pc_rsq <- lmmatrix(dep = scores, ind = pDat_cor, metric = "Rsquared") #correaltion matrix
+
+pc_rsq_1 <- t(pc_rsq) %>%
+  as.data.frame %>% 
+  slice_head(n=10)
+
+rsq_plot <- pc_rsq_1 %>% 
+  mutate(Principal_Component = rownames(pc_rsq_1),
+         PC = as.factor(1:10)) %>% 
+  pivot_longer(cols = -c(Principal_Component, PC), names_to = "Variable", values_to = "rsq")
+
+rsq_plot %>% 
+  ggplot(aes(x = PC, y = Variable , fill = rsq)) +
+  geom_tile(col = "lightgray") +
+  theme_bw() +
+  scale_x_discrete(expand = c(0, 0)) + #expand function fits the plot to its assigned dimesions 
+  scale_y_discrete(expand = c(0, 0)) +
+  scale_fill_gradient(low = "white", high = "#509e36") +
+  coord_fixed() + # very important otherwise height of each tile is elongated!
+  labs(x = "", y = "", fill = "Rsq")
+
+```
+
+Viewing the plots together:
+
+```{r p-rsq}
+
+p1 <- pc_plot %>% 
+  ggplot(aes(x = PC, y = Variable , fill = pval_cat)) +
+  geom_tile(col = "lightgray") +
+  theme_bw() +
+  scale_x_discrete(expand = c(0, 0)) + #expand function fits the plot to its assigned dimesions 
+  scale_y_discrete(expand = c(0, 0)) +
+  scale_fill_manual(values = pc_colpal)  + 
+  coord_fixed() + # very important otherwise height of each tile is nelongated!
+  labs(title = "Contribution of Variables to Observed Expression 22", x = "", y = "", fill = "P value")
+
+r1 <- rsq_plot %>% 
+  ggplot(aes(x = PC, y = Variable , fill = rsq)) +
+  geom_tile(col = "lightgray") +
+  theme_bw() +
+  scale_x_discrete(expand = c(0, 0)) + #expand function fits the plot to its assigned dimesions 
+  scale_y_discrete(expand = c(0, 0)) +
+  scale_fill_gradient(low = "white", high = "#509e36") +
+  coord_fixed() + # very important otherwise height of each tile is elongated!
+  labs(x = "", y = "", fill = "Rsq")
+
+egg::ggarrange(p1, r1, nrow = 2, ncol = 1) 
+
+```
+
+Now, we can confidently say that of the 5 variables we selected, barring Sex, all the other 4 are contributing towards the variation in expression that we see, and so we'll be including them further on in our analyses  
+
+Now that we've figured which variables to use, let's actually check how the samples separate by them  
+
+**Make the following scatter plots with mDat**  
+
+- PC1 vs PC2 for:
+  - Trimester
+  - RQS (bucket according to your preference)
+  - hours
+  - flowcell
+
+- PC2 vs PC3 for:
+  - Trimester
+  - RQS
+  
+Colour by variables mentioned above, and set the same x and y axes +/- limits  
+
+```{r PC1-2,warning=FALSE}
+pc1_pc2_1 <- mDat %>% 
+  ggplot(aes(x = PC1, y = PC2 , color = Trimester)) +
+  geom_point()+
+  scale_x_continuous(limits = c(-2, 2)) + 
+  scale_y_continuous(limits = c(-2, 2))
+  
+
+pc1_pc2_2 <- mDat %>% 
+  ggplot(aes(x = PC1, y = PC2 , color = RQS)) +
+  geom_point()+
+  scale_x_continuous(limits = c(-2, 2)) + 
+  scale_y_continuous(limits = c(-2, 2))
+  
+pc1_pc2_3 <- mDat %>% 
+  ggplot(aes(x = PC1, y = PC2 , color = Processing_time)) +
+  geom_point()+
+  scale_x_continuous(limits = c(-2, 2)) + 
+  scale_y_continuous(limits = c(-2, 2))
+
+
+pc1_pc2_4<- mDat %>% 
+  ggplot(aes(x = PC1, y = PC2 , color = flowCell)) +
+  geom_point()+
+  scale_x_continuous(limits = c(-2, 2)) + 
+  scale_y_continuous(limits = c(-2, 2))
+
+ggarrange(pc1_pc2_1, pc1_pc2_2,pc1_pc2_3, pc1_pc2_4, nrow = 2, ncol = 2)
+
+```
+
+
+```{r PC2-3, warning=FALSE}
+
+pc2_pc3_1 <- mDat %>% 
+  ggplot(aes(x = PC2, y = PC3 , color = Trimester)) +
+  geom_point()+
+  scale_x_continuous(limits = c(-2, 2)) +
+  scale_y_continuous(limits = c(-2, 2))
+
+pc2_pc3_2 <- mDat %>% 
+  ggplot(aes(x = PC2, y = PC3 , color = RQS)) +
+  geom_point()+
+  scale_x_continuous(limits = c(-2, 2)) +
+  scale_y_continuous(limits = c(-2, 2))
+
+ggarrange(pc2_pc3_1, pc2_pc3_2, nrow = 2, ncol = 1)
+
+
+```
+
+Based on the plots, which variable/s seem to be contributing the most variation towards our data?  
+
+***
+
+
